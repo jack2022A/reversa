@@ -1,103 +1,57 @@
-PLAYSTAGE LIVE CATALINA - VERSAO 0.3 (PRE-ALFA)
-=================================================
+PLAYSTAGE LIVE CATALINA - VERSAO 0.4 (PRE-ALFA)
+================================================
 
-ATENCAO: ESTE PACOTE E CODIGO-FONTE; NAO CONTEM UM .APP COMPILADO.
-O AUTOR NAO VALIDOU O FUNCIONAMENTO NO MACOS 10.15 NEM COM PLUGINS REAIS.
+O aplicativo foi compilado para Intel com alvo macOS 10.15, mas ainda nao
+foi testado em todos os dispositivos Catalina e VST3 de terceiros.
 
-O que este codigo implementa:
-- Aplicativo desktop JUCE/C++ nativo, sem Safari, Chrome ou HTML.
-- Saida de audio usando CoreAudio por meio do JUCE.
-- Quatro camadas de instrumentos VST3 e Audio Unit (.component) para macOS.
-- Recepcao de teclados MIDI externos (teclado virtual removido).
-- Volume e mute independentes por canal.
-- Interface de palco em tons de azul e branco e 10 programas selecionaveis.
-- Salvar e abrir banco de 10 programas em arquivo .psstage (JSON), incluindo
-  caminhos e estados dos VST3 instalados no Mac.
-- Solo, filtro passa-baixas, transposicao MIDI (-12/+12) e medidores por camada.
-- Painel AJUSTES DA CAMADA: nota inicial/final, canal MIDI, curva/limites/ganho
-  de velocidade, EQ de graves/medios/agudos, envelope (attack/release), drive,
-  rotary/tremolo e envio de reverb. Implementacao propria, nao algoritmos Apple.
-- Master com volume, reverb estereo, medidores, sustain CC64 e PANIC MIDI.
-- Janela com editor nativo do plugin VST3/AU quando disponivel.
-- Seletor do dispositivo de saida de audio e MIDI.
-- Painel "Biblioteca MainStage" que consulta pastas padrao de presets
-  do MainStage 3/Logic e permite acrescentar uma pasta personalizada.
-- Selecao de item da biblioteca mostra o caminho; duplo clique abre no Finder.
-  Os arquivos originais nao sao copiados, movidos nem alterados.
+O que pode tocar:
+- Instrumentos VST3 compativeis com Mac Intel e macOS Catalina.
+- Samples de audio WAV ou AIFF (.wav, .aif, .aiff) de bibliotecas Ableton
+  que voce possua e possa utilizar. FLAC depende do decoder disponivel.
+- Uma amostra por camada, mapeada cromaticamente para o teclado MIDI externo,
+  com nota base C4 (MIDI 60), 16 vozes e duracao maxima de 30 segundos.
+- Quatro camadas em paralelo, com volumes, filtro, EQ, drive, rotary, envelope,
+  zona MIDI, velocity, master, reverb, pedal e PANIC.
+- Dez programas por banco .psstage, incluindo caminhos dos samples e VST3.
 
-O que AINDA NAO implementa:
-- Carregamento integral e fiel de arquivos .concert do MainStage.
-- Instrumentos exclusivos Logic/MainStage da Apple (EXS, Sampler, Alchemy etc).
-- Os instrumentos Apple integrados ao MainStage geralmente NAO aparecem como
-  plugins .component e NAO podem ser reutilizados automaticamente por este app.
-- Apenas Audio Units expostos como componentes no macOS podem ser selecionados,
-  e dependem da compatibilidade e licenca do plugin instalado.
-- Abrir plugins VST3 para Windows (um binario Windows nao funciona no macOS).
-- Efeitos auxiliares completos e roteamento de audio externo e controle de pan.
-- Conversao automatica de arquivos .patch/.concert da Apple para .psstage.
-- Recuperacao de plugins que travem dentro do mesmo processo.
-- Reproducao direta dos presets listados na Biblioteca MainStage.
+Biblioteca Ableton:
+- O painel esquerdo busca WAV/AIFF em ~/Music/Ableton/User Library,
+  ~/Music/Ableton/Factory Packs e ~/Music/Ableton (se existirem).
+- O botao "Escolher pasta" permite indexar uma pasta personalizada com
+  audio ja disponivel no disco, sem modificar ou extrair os arquivos.
+- Escolha o destino CAMADA 1..4 e de duplo clique em um sample para carrega-lo.
+- Uma amostra isolada NAO e um preset multiamostral de Sampler ou Simpler.
 
-Requisitos de compilacao:
-- macOS Intel e Xcode (Xcode 12.4 ou mais novo).
-- macOS 10.15.4+ se a compilacao for feita diretamente no Catalina.
-- CMake 3.22+ e conexao a internet para buscar JUCE 8.0.16-security.
-- O plugin .vst3/.component instalado deve ser uma versao para macOS Intel compativel
-  com a versao de macOS do usuario.
+Formatos Ableton que NAO tocamos diretamente:
+- .adg (Racks), .adv (presets de device), .alp (packs nao instalados),
+  .als (sets), .amxd (Max for Live). Esses arquivos dependem de recursos
+  internos do Live para serem reproduzidos fielmente.
+- A conversao automatica de instrumentos Ableton para VST3 nao existe aqui.
+- Nao inclua samples protegidos por direitos ou licencas que impeçam o uso.
 
-Para compilar no Mac:
-    bash COMPILAR_CATALINA.command
-O resultado fica em Saida/PlayStage_VST3_Catalina_Intel.zip
+Recursos removidos nesta versao, conforme solicitado:
+- Leitura e catalogacao de pastas do MainStage e seus arquivos .patch/.exs.
+- Hospedagem Audio Unit (.component); o motor de plugins e apenas VST3.
+- Teclado virtual (foi removido na versao anterior).
 
-Alternativa de compilacao online (nao requer instalar Xcode no Mac):
-1. Publique o conteudo desta pasta em um repositorio GitHub de sua conta.
-2. Um push para a branch main dispara o workflow automaticamente.
-   Tambem pode abrir Actions > Compilar app macOS Intel > Run workflow.
-3. Quando terminar, baixe o ZIP em Artifacts da execucao.
-OBS: essas etapas dependem de uma conta, repositorio e acesso a runners macOS.
+Instalacao:
+1. Baixe PlayStage_VST3_Catalina_Intel.zip na Release da versao 0.4.
+2. Extraia o arquivo e copie o aplicativo para /Aplicativos.
+3. Abra o aplicativo, ajuste "Audio / MIDI" e conecte teclado MIDI externo.
+4. Use "+ VST3 / WAV / AIFF" ou a lista "AMOSTRAS ABLETON".
+5. Salve um banco em .psstage para restaurar instrumentos e camadas.
 
-Como usar depois de instalado:
-- Tenha um instrumento macOS .vst3 ou .component (Audio Unit) instalado,
-  em ~/Library/Audio/Plug-Ins ou /Library/Audio/Plug-Ins.
-- Inicie o PlayStage VST3 Catalina.
-- Clique "Audio / MIDI" e selecione a saida CoreAudio.
-- Em qualquer camada, clique "+ Escolher VST3 / AU", selecione o plugin.
-- Clique "Editor do plugin" para abrir seu painel original, se disponivel.
-- Clique "AJUSTES DA CAMADA" para editar a faixa MIDI, curva de velocidade,
-  equalizacao, envelope e efeitos.
-- Toque no teclado MIDI externo. Os quatro canais podem soar juntos.
-- Use os botoes 1 a 10 para montar e alternar programas. Use "Salvar preset"
-  para exportar o banco .psstage; "Abrir preset" para restaurar no Mac.
-- O arquivo .psstage nao inclui os plugins em si: eles precisam permanecer
-  instalados nos mesmos caminhos do computador.
-- Use S/M para solo/mute, FILTER para limitar agudos, TRANSPOSE para mudar
-  a nota MIDI e MASTER/REVERB para ajustar a saida conjunta.
-- Para evitar cortes de audio no palco, nao troque programas enquanto toca:
-  esta versao pode recarregar plugins sincronamente e nao oferece crossfade.
-- Clique "Buscar biblioteca" para catalogar patches e instrumentos nas
-  pastas padrao do MainStage/Logic no proprio Mac. Essa catalogacao
-  NAO transforma presets Apple em VST3.
+Para compilar pelo Mac, se tiver Xcode/CMake:
+  bash COMPILAR_CATALINA.command
 
-Pastas padrao consultadas no Catalina (se existirem):
-  ~/Library/Application Support/Logic/MainStage Patches
-  ~/Music/Audio Music Apps/Patches
-  ~/Music/Audio Music Apps/Channel Strip Settings
-  ~/Music/Audio Music Apps/Concerts
-  /Library/Application Support/Logic/Sampler Instruments
-  /Library/Application Support/Logic/Plug-In Settings
-  /Library/Application Support/Logic/Channel Strip Settings
-  /Library/Application Support/Logic/MainStage Patches
-Observacao: conteudo relocavel para disco externo exige "Outra pasta...".
-
-IMPORTANTE: para distribuir aplicativos gerados com JUCE, verifique a
-licenca JUCE/GPL ou uma licenca comercial apropriada.
-
-Falhas potenciais:
-- Alguns plugins VST3 para macOS podem exigir uma versao mais recente
-  do sistema ou validacao/instalacao pelo fabricante.
-- Plugins de terceiros podem falhar ou derrubar o processo. Use copias
-  dos projetos e teste os instrumentos antes de usar ao vivo.
-- Um ZIP compilado sem assinatura Developer ID/notarizacao pode exibir
-  avisos do Gatekeeper. Nao desative protecoes globais do macOS.
-- A compilacao de macOS com deployment target 10.15 nao comprova que
-  todo plugin e todo conjunto de bibliotecas serao compativeis com Catalina.
+Importante:
+- O sampler nao importa os parametros e mapas das bibliotecas Ableton.
+- Os samples de um .alp devem estar previamente instalados com o Ableton,
+  conforme os termos da sua licenca; o PlayStage nao abre o .alp.
+- Plugins VST3 Windows nao funcionam no macOS.
+- O programa e experimental. Teste com copia dos seus presets antes de tocar
+  ao vivo, pois plugins podem travar e troca de programas pode causar cortes.
+- Apps distribuídos sem Developer ID/notarizacao podem gerar aviso do Gatekeeper.
+  Nao desative as protecoes globais do macOS.
+- Para redistribuir o aplicativo, respeite a licenca JUCE/GPL ou obtenha
+  licenca JUCE apropriada.

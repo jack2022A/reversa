@@ -253,6 +253,74 @@ private:
     std::atomic<float> velocityCurve { 1.0f }, velocityGain { 1.0f };
 };
 
+// Basic, independent sample instrument. It does not read Ableton Rack presets:
+// an explicitly selected audio file is pitched chromatically from MIDI note 60.
+class SampleInstrumentProcessor final : public juce::AudioProcessor
+{
+public:
+    SampleInstrumentProcessor(const juce::File& file, juce::String& error)
+        : juce::AudioProcessor(juce::AudioProcessor::BusesProperties()
+                                   .withOutput("Stereo output", juce::AudioChannelSet::stereo(), true)),
+          name("Amostra: " + file.getFileNameWithoutExtension())
+    {
+        formats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
+        if (reader == nullptr)
+        {
+            error = "Nao foi possivel ler esta amostra. Use WAV ou AIFF desprotegido.";
+            return;
+        }
+        if (reader->lengthInSamples <= 0 || reader->sampleRate <= 0.0)
+        {
+            error = "A amostra nao contem audio reproduzivel.";
+            return;
+        }
+        for (int i = 0; i < 16; ++i)
+            synth.addVoice(new juce::SamplerVoice());
+        juce::BigInteger notes;
+        notes.setRange(0, 128, true);
+        synth.addSound(new juce::SamplerSound(name, *reader, notes, 60, 0.01, 0.35, 30.0));
+        loaded = synth.getNumSounds() > 0;
+    }
+
+    bool isLoaded() const { return loaded; }
+    const juce::String getName() const override { return name; }
+    void prepareToPlay(double sampleRate, int) override
+    {
+        synth.setCurrentPlaybackSampleRate(sampleRate);
+    }
+    void releaseResources() override { synth.allSoundsOff(1, false); }
+    void processBlock(juce::AudioBuffer<float>& audio, juce::MidiBuffer& midi) override
+    {
+        audio.clear();
+        synth.renderNextBlock(audio, midi, 0, audio.getNumSamples());
+    }
+    bool isBusesLayoutSupported(const BusesLayout& layout) const override
+    {
+        return layout.getMainInputChannelSet().isDisabled()
+            && layout.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
+    }
+    bool acceptsMidi() const override { return true; }
+    bool producesMidi() const override { return false; }
+    bool isMidiEffect() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.35; }
+    bool hasEditor() const override { return false; }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return {}; }
+    void changeProgramName(int, const juce::String&) override {}
+    void getStateInformation(juce::MemoryBlock&) override {}
+    void setStateInformation(const void*, int) override {}
+
+private:
+    juce::AudioFormatManager formats;
+    juce::Synthesiser synth;
+    juce::String name;
+    bool loaded = false;
+};
+
 class MasterProcessor final : public juce::AudioProcessor
 {
 public:
@@ -329,9 +397,6 @@ public:
     HostEngine()
     {
         pluginFormats.addFormat(std::make_unique<juce::VST3PluginFormat>());
-#if JUCE_PLUGINHOST_AU
-        pluginFormats.addFormat(std::make_unique<juce::AudioUnitPluginFormat>());
-#endif
         graph = std::make_unique<juce::AudioProcessorGraph>();
         graph->setPlayConfigDetails(0, 2, 44100.0, 512);
 
@@ -466,34 +531,35 @@ public:
 
     bool loadInstrument(int index, const juce::File& file, juce::String& error)
     {
+        const auto ext = file.getFileExtension().toLowerCase();
+        const bool isSample = ext == ".wav" || ext == ".aif" || ext == ".aiff" || ext == ".flac";
         if (!juce::isPositiveAndBelow(index, kSlots) || !file.exists()
-            || !(file.hasFileExtension(".vst3") || file.hasFileExtension(".component")))
+            || !(ext == ".vst3" || isSample))
         {
-            error = "Selecione um instrumento .vst3 ou .component valido para macOS.";
+            error = "Selecione um VST3 ou amostra WAV/AIFF/FLAC para macOS.";
             return false;
         }
 
-        juce::OwnedArray<juce::PluginDescription> candidates;
-        const bool isAu = file.hasFileExtension(".component");
-#if JUCE_PLUGINHOST_AU
-        auto* format = pluginFormats.getFormat(isAu ? 1 : 0);
-#else
-        if (isAu)
+        std::unique_ptr<juce::AudioProcessor> instance;
+        if (isSample)
         {
-            error = "Hospedagem de Audio Units indisponivel nesta compilacao.";
-            return false;
+            auto sample = std::make_unique<SampleInstrumentProcessor>(file, error);
+            if (!sample->isLoaded())
+                return false;
+            instance = std::move(sample);
         }
-        auto* format = pluginFormats.getFormat(0);
-#endif
-        format->findAllTypesForFile(candidates, file.getFullPathName());
-        if (candidates.isEmpty())
+        else
         {
-            error = "Nao foi encontrado um instrumento compativel neste plugin.";
-            return false;
+            juce::OwnedArray<juce::PluginDescription> candidates;
+            pluginFormats.getFormat(0)->findAllTypesForFile(candidates, file.getFullPathName());
+            if (candidates.isEmpty())
+            {
+                error = "Nao foi encontrado um VST3 compativel neste arquivo.";
+                return false;
+            }
+            instance = pluginFormats.createPluginInstance(*candidates[0], getSampleRate(),
+                                                          getBufferSize(), error);
         }
-
-        auto instance = pluginFormats.createPluginInstance(*candidates[0], getSampleRate(),
-                                                            getBufferSize(), error);
         if (!instance)
             return false;
 
@@ -768,13 +834,13 @@ public:
         heading.setColour(juce::Label::textColourId, kLayerColours[static_cast<size_t>(channel)]);
         addAndMakeVisible(heading);
 
-        instrument.setText("+ Instrumento VST3 / AU", juce::dontSendNotification);
+        instrument.setText("+ VST3 / AMOSTRA", juce::dontSendNotification);
         instrument.setJustificationType(juce::Justification::centred);
         instrument.setFont(juce::Font(13.0f, juce::Font::bold));
         instrument.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(instrument);
 
-        loadButton.setButtonText("+ Escolher VST3 / AU");
+        loadButton.setButtonText("+ VST3 / WAV / AIFF");
         loadButton.onClick = [this] { onLoad(channel); };
         addAndMakeVisible(loadButton);
         editButton.setButtonText("Editor do plugin");
@@ -843,9 +909,9 @@ public:
         mute.setToggleState(layer.muted, juce::dontSendNotification);
         solo.setToggleState(layer.solo, juce::dontSendNotification);
         transpose.setValue(layer.transpose, juce::dontSendNotification);
-        instrument.setText(layer.name.isEmpty() ? "+ Instrumento VST3 / AU" : layer.name,
+        instrument.setText(layer.name.isEmpty() ? "+ VST3 / AMOSTRA" : layer.name,
                            juce::dontSendNotification);
-        editButton.setEnabled(layer.file.isNotEmpty());
+        editButton.setEnabled(juce::File(layer.file).hasFileExtension(".vst3"));
         applying = false;
         notify();
     }
@@ -855,9 +921,9 @@ public:
         saved.name = name;
         saved.file = file;
         saved.pluginState.clear();
-        instrument.setText(name.isEmpty() ? "+ Instrumento VST3 / AU" : name,
+        instrument.setText(name.isEmpty() ? "+ VST3 / AMOSTRA" : name,
                            juce::dontSendNotification);
-        editButton.setEnabled(file.isNotEmpty());
+        editButton.setEnabled(juce::File(file).hasFileExtension(".vst3"));
     }
 
     void setMeter(float level) { meter = juce::jlimit(0.0f, 1.0f, level); repaint(); }
@@ -936,14 +1002,14 @@ class MainComponent final : public juce::Component,
                             private juce::Timer
 {
 public:
-    MainComponent() : libraryList("Biblioteca MainStage", this)
+    MainComponent() : libraryList("Samples Ableton", this)
     {
         title.setText("PLAYSTAGE LIVE / CATALINA", juce::dontSendNotification);
         title.setFont(juce::Font(29.0f, juce::Font::bold));
         title.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(title);
 
-        subtitle.setText("VST3 + AUDIO UNITS / 4 CAMADAS / 10 PROGRAMAS", juce::dontSendNotification);
+        subtitle.setText("VST3 + WAV / AIFF / AMOSTRAS ABLETON", juce::dontSendNotification);
         subtitle.setFont(juce::Font(11.0f));
         subtitle.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         addAndMakeVisible(subtitle);
@@ -979,19 +1045,24 @@ public:
         openButton.onClick = [this] { openPresetFile(); };
         addAndMakeVisible(openButton);
 
-        project.setText("BIBLIOTECA DO MAC\n\nMainStage (consulta)",
+        project.setText("AMOSTRAS ABLETON\n\nWAV / AIFF\n(.adg/.adv nao abrem)",
                         juce::dontSendNotification);
         project.setJustificationType(juce::Justification::topLeft);
         project.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(project);
 
-        scanLibraryButton.setButtonText("Buscar biblioteca");
-        scanLibraryButton.onClick = [this] { scanDefaultLibrary(); };
+        scanLibraryButton.setButtonText("Buscar samples");
+        scanLibraryButton.onClick = [this] { scanDefaultSamples(); };
         addAndMakeVisible(scanLibraryButton);
 
-        customLibraryButton.setButtonText("Outra pasta...");
+        customLibraryButton.setButtonText("Escolher pasta...");
         customLibraryButton.onClick = [this] { chooseLibraryFolder(); };
         addAndMakeVisible(customLibraryButton);
+
+        for (int i = 0; i < kSlots; ++i)
+            sampleTarget.addItem("Carregar na CAMADA " + juce::String(i + 1), i + 1);
+        sampleTarget.setSelectedId(1, juce::dontSendNotification);
+        addAndMakeVisible(sampleTarget);
 
         libraryList.setRowHeight(25);
         libraryList.setColour(juce::ListBox::backgroundColourId, juce::Colour(0xff112743));
@@ -1043,7 +1114,7 @@ public:
         addAndMakeVisible(pedalButton);
 
         status.setText(engine.getLastError().isEmpty()
-                           ? "Pronto. Selecione um instrumento VST3/AU para Mac. MIDI externo habilitado."
+                           ? "Pronto. Carregue um VST3 ou arquivo de amostra WAV/AIFF. MIDI externo habilitado."
                            : engine.getLastError(), juce::dontSendNotification);
         status.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         addAndMakeVisible(status);
@@ -1072,7 +1143,7 @@ public:
         }
 
         setSize(1320, 790);
-        scanDefaultLibrary();
+        scanDefaultSamples();
         refreshProgramButtons();
         startTimerHz(18);
     }
@@ -1104,14 +1175,16 @@ public:
         if (juce::isPositiveAndBelow(lastRow, libraryFiles.size()))
         {
             const auto path = libraryFiles.getReference(lastRow).getFullPathName();
-            status.setText("Biblioteca (consulta): " + path, juce::dontSendNotification);
+            status.setText("Amostra selecionada: " + path + " (duplo clique para tocar)",
+                           juce::dontSendNotification);
         }
     }
 
     void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override
     {
         if (juce::isPositiveAndBelow(row, libraryFiles.size()))
-            libraryFiles.getReference(row).revealToUser();
+            loadFileIntoLayer(juce::jlimit(0, kSlots - 1, sampleTarget.getSelectedId() - 1),
+                              libraryFiles.getReference(row));
     }
 
     void paint(juce::Graphics& g) override
@@ -1180,6 +1253,8 @@ public:
         scanLibraryButton.setBounds(sidebar.removeFromTop(30));
         sidebar.removeFromTop(5);
         customLibraryButton.setBounds(sidebar.removeFromTop(30));
+        sidebar.removeFromTop(6);
+        sampleTarget.setBounds(sidebar.removeFromTop(30));
         sidebar.removeFromTop(6);
         libraryList.setBounds(sidebar);
         area.removeFromLeft(8);
@@ -1504,31 +1579,23 @@ private:
         });
     }
 
-    void scanDefaultLibrary()
+    void scanDefaultSamples()
     {
         libraryFiles.clearQuick();
         const auto home = juce::File::getSpecialLocation(juce::File::userHomeDirectory);
-        // MainStage 3.x / Logic content locations, including Catalina-era installs.
+        // Search only user-owned sample folders; Ableton Rack/Pack projects remain untouched.
         const juce::StringArray paths {
-            "Library/Application Support/Logic/MainStage Patches",
-            "Music/Audio Music Apps/Patches",
-            "Music/Audio Music Apps/Channel Strip Settings",
-            "Music/Audio Music Apps/Concerts" };
+            "Music/Ableton/User Library",
+            "Music/Ableton/Factory Packs",
+            "Music/Ableton" };
 
         for (auto& path : paths)
             indexLibraryFolder(home.getChildFile(path));
 
-        const auto shared = juce::File::getSpecialLocation(juce::File::globalApplicationsDirectory)
-                                .getParentDirectory().getChildFile("Library/Application Support/Logic");
-        indexLibraryFolder(shared.getChildFile("Sampler Instruments"));
-        indexLibraryFolder(shared.getChildFile("Plug-In Settings"));
-        indexLibraryFolder(shared.getChildFile("Channel Strip Settings"));
-        indexLibraryFolder(shared.getChildFile("MainStage Patches"));
-
         libraryList.updateContent();
         libraryList.repaint();
-        status.setText("Biblioteca MainStage: " + juce::String(libraryFiles.size())
-                           + " itens encontrados (consulta, sem conversao para VST3).",
+        status.setText("Amostras Ableton: " + juce::String(libraryFiles.size())
+                           + " arquivos de audio indexados; .adg/.adv/.alp nao sao tocaveis diretamente.",
                        juce::dontSendNotification);
     }
 
@@ -1551,8 +1618,7 @@ private:
             {
                 const auto item = iterator.getFile();
                 const auto ext = item.getFileExtension().toLowerCase();
-                if (ext == ".patch" || ext == ".concert" || ext == ".cst"
-                    || ext == ".exs" || ext == ".pst" || ext == ".aupreset")
+                if (ext == ".wav" || ext == ".aif" || ext == ".aiff" || ext == ".flac")
                 {
                     libraryFiles.addIfNotAlreadyThere(item);
                     if (libraryFiles.size() >= 350)
@@ -1569,8 +1635,9 @@ private:
     void chooseLibraryFolder()
     {
         libraryChooser = std::make_unique<juce::FileChooser>(
-            "Escolha a pasta com projetos ou presets do MainStage",
-            juce::File::getSpecialLocation(juce::File::userHomeDirectory));
+            "Escolha a pasta com WAV/AIFF da biblioteca Ableton",
+            juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                .getChildFile("Music/Ableton"));
         libraryChooser->launchAsync(juce::FileBrowserComponent::openMode
                                       | juce::FileBrowserComponent::canSelectDirectories,
                                     [this](const juce::FileChooser& chooserResult)
@@ -1581,7 +1648,7 @@ private:
             indexLibraryFolder(folder);
             libraryList.updateContent();
             libraryList.repaint();
-            status.setText("Biblioteca indexada: " + folder.getFullPathName(),
+            status.setText("Amostras indexadas: " + folder.getFullPathName(),
                            juce::dontSendNotification);
         });
     }
@@ -1589,10 +1656,10 @@ private:
     void pickVst3(int index)
     {
         chooser = std::make_unique<juce::FileChooser>(
-            "Selecione um plugin VST3 ou Audio Unit para macOS",
+            "Selecione um VST3 ou um sample WAV/AIFF do Ableton",
             juce::File::getSpecialLocation(juce::File::userHomeDirectory)
-                .getChildFile("Library/Audio/Plug-Ins"),
-            "*.vst3;*.component");
+                .getChildFile("Music"),
+            "*.vst3;*.wav;*.aif;*.aiff;*.flac");
 
         const auto flags = juce::FileBrowserComponent::openMode
                          | juce::FileBrowserComponent::canSelectFiles
@@ -1602,26 +1669,32 @@ private:
             const auto file = selected.getResult();
             if (!file.exists())
                 return;
-
-            editors[static_cast<size_t>(index)].reset();
-            juce::String error;
-            if (!engine.loadInstrument(index, file, error))
-            {
-                status.setText("Falha ao abrir VST3/AU: " + error, juce::dontSendNotification);
-                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                        "Instrumento VST3 / AU", error);
-                return;
-            }
-
-            if (auto* plugin = engine.getPlugin(index))
-            {
-                loadedPaths[static_cast<size_t>(index)] = file.getFullPathName();
-                strips[static_cast<size_t>(index)]->setPlugin(plugin->getName(), file.getFullPathName());
-                programs[static_cast<size_t>(selectedProgram)].layers[static_cast<size_t>(index)] =
-                    strips[static_cast<size_t>(index)]->getState();
-                status.setText("Carregado: " + plugin->getName(), juce::dontSendNotification);
-            }
+            loadFileIntoLayer(index, file);
         });
+    }
+
+    void loadFileIntoLayer(int index, const juce::File& file)
+    {
+        if (!juce::isPositiveAndBelow(index, kSlots))
+            return;
+        editors[static_cast<size_t>(index)].reset();
+        juce::String error;
+        if (!engine.loadInstrument(index, file, error))
+        {
+            status.setText("Falha ao abrir instrumento: " + error, juce::dontSendNotification);
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                    "Instrumento VST3 / Amostra", error);
+            return;
+        }
+        if (auto* plugin = engine.getPlugin(index))
+        {
+            loadedPaths[static_cast<size_t>(index)] = file.getFullPathName();
+            strips[static_cast<size_t>(index)]->setPlugin(plugin->getName(), file.getFullPathName());
+            programs[static_cast<size_t>(selectedProgram)].layers[static_cast<size_t>(index)] =
+                strips[static_cast<size_t>(index)]->getState();
+            status.setText("Carregado: " + plugin->getName() + " na CAMADA "
+                               + juce::String(index + 1), juce::dontSendNotification);
+        }
     }
 
     void openEditor(int index)
@@ -1685,6 +1758,7 @@ private:
     int selectedProgram = 0;
     juce::Array<juce::File> libraryFiles;
     juce::ListBox libraryList;
+    juce::ComboBox sampleTarget;
     std::array<std::unique_ptr<ChannelStrip>, kSlots> strips;
     std::array<std::unique_ptr<PluginEditorWindow>, kSlots> editors;
     std::unique_ptr<juce::FileChooser> chooser;
@@ -1713,7 +1787,7 @@ class PlayStageApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "PlayStage VST3 Catalina"; }
-    const juce::String getApplicationVersion() override { return "0.3.0"; }
+    const juce::String getApplicationVersion() override { return "0.4.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override
     {
