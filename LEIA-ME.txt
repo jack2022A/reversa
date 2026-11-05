@@ -1,4 +1,4 @@
-PLAYSTAGE VST3 CATALINA - PROJETO NATIVO (PRE-ALFA)
+PLAYSTAGE VST3 CATALINA - VERSAO 0.2 (PRE-ALFA)
 =================================================
 
 ATENCAO: ESTE PACOTE E CODIGO-FONTE; NAO CONTEM UM .APP COMPILADO.
@@ -10,6 +10,11 @@ O que este codigo implementa:
 - Quatro canais de instrumento VST3, em paralelo (layers).
 - Recepcao de teclados MIDI e teclado musical clicavel na tela.
 - Volume e mute independentes por canal.
+- Interface de palco com quatro camadas coloridas e 10 programas selecionaveis.
+- Salvar e abrir banco de 10 programas em arquivo .psstage (JSON), incluindo
+  caminhos e estados dos VST3 instalados no Mac.
+- Solo, filtro passa-baixas, transposicao MIDI (-12/+12) e medidores por camada.
+- Master com volume, reverb estereo, medidores, sustain CC64 e PANIC MIDI.
 - Janela com editor nativo do plugin VST3 quando disponivel.
 - Seletor do dispositivo de saida de audio e MIDI.
 - Painel "Biblioteca MainStage" que consulta pastas padrao de presets
@@ -21,8 +26,8 @@ O que AINDA NAO implementa:
 - Carregamento integral e fiel de arquivos .concert do MainStage.
 - Instrumentos exclusivos Logic/MainStage da Apple (EXS, Sampler, Alchemy etc).
 - Abrir plugins VST3 para Windows (um binario Windows nao funciona no macOS).
-- Presets e efeitos auxiliares completos, roteamento de audio externo,
-  controle de pan e salvamento dos patches.
+- Efeitos auxiliares completos e roteamento de audio externo e controle de pan.
+- Conversao automatica de arquivos .patch/.concert da Apple para .psstage.
 - Recuperacao de plugins que travem dentro do mesmo processo.
 - Reproducao direta dos presets listados na Biblioteca MainStage.
 
@@ -49,9 +54,17 @@ Como usar depois de instalado:
   em ~/Library/Audio/Plug-Ins/VST3 ou /Library/Audio/Plug-Ins/VST3.
 - Inicie o PlayStage VST3 Catalina.
 - Clique "Audio / MIDI" e selecione a saida CoreAudio.
-- Em qualquer canal, clique "Abrir VST3", selecione o plugin .vst3.
+- Em qualquer camada, clique "+ Adicionar VST3", selecione o plugin .vst3.
 - Clique "Editor" para abrir o painel original do instrumento.
 - Toque no teclado MIDI ou teclado da tela. Os 4 canais soam juntos.
+- Use os botoes 1 a 10 para montar e alternar programas. Use "Salvar preset"
+  para exportar o banco .psstage; "Abrir preset" para restaurar no Mac.
+- O arquivo .psstage nao inclui os plugins em si: eles precisam permanecer
+  instalados nos mesmos caminhos do computador.
+- Use S/M para solo/mute, FILTER para limitar agudos, TRANSPOSE para mudar
+  a nota MIDI e MASTER/REVERB para ajustar a saida conjunta.
+- Para evitar cortes de audio no palco, nao troque programas enquanto toca:
+  esta versao pode recarregar plugins sincronamente e nao oferece crossfade.
 - Clique "Buscar biblioteca" para catalogar patches e instrumentos nas
   pastas padrao do MainStage/Logic no proprio Mac. Essa catalogacao
   NAO transforma presets Apple em VST3.

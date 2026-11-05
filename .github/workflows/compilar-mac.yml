@@ -35,12 +35,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view v0.1.0-catalina-prealpha >/dev/null 2>&1; then
-            gh release upload v0.1.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip --clobber
+          if gh release view v0.2.0-catalina-prealpha >/dev/null 2>&1; then
+            gh release upload v0.2.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip --clobber
           else
-            gh release create v0.1.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip \
-              --title "PlayStage VST3 Catalina - pre-alfa" \
-              --notes "Aplicativo nativo Intel. Compilado para deployment target macOS 10.15. Nao testado em Catalina ou com VST3 de terceiros. Baixe por sua conta e risco, teste sem uso ao vivo." \
+            gh release create v0.2.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip \
+              --title "PlayStage Live 0.2 - Catalina Intel (pre-alfa)" \
+              --notes "Interface com dez programas e quatro camadas VST3 reais, filtro, transposicao MIDI, solo/mute, master, reverb, pedal, panic e bancos .psstage. Target macOS Intel 10.15. Nao suporta instrumentos proprietarios .patch/.concert da Apple; compatibilidade Catalina e plugins de terceiros nao testada. Teste antes de utilizar ao vivo." \
               --prerelease --target "${GITHUB_SHA}"
           fi
 
