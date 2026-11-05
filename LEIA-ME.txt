@@ -29,7 +29,7 @@ O que AINDA NAO implementa:
 Requisitos de compilacao:
 - macOS Intel e Xcode (Xcode 12.4 ou mais novo).
 - macOS 10.15.4+ se a compilacao for feita diretamente no Catalina.
-- CMake 3.22+ e conexao a internet para buscar JUCE 7.0.12.
+- CMake 3.22+ e conexao a internet para buscar JUCE 8.0.16-security.
 - O plugin .vst3 instalado deve ser uma versao para macOS Intel compatível
   com a versao de macOS do usuario.
 
