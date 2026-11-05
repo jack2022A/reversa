@@ -321,6 +321,181 @@ private:
     bool loaded = false;
 };
 
+// Separate velocity regions are required for multisamples such as the Astoria
+// piano. JUCE's stock SamplerSound filters notes, but not velocities.
+class VelocitySamplerSound final : public juce::SamplerSound
+{
+public:
+    VelocitySamplerSound(const juce::String& label, juce::AudioFormatReader& reader,
+                         const juce::BigInteger& notes, int root, int low, int high,
+                         double maximumDuration)
+        : juce::SamplerSound(label, reader, notes, root, 0.005, 0.3, maximumDuration),
+          lowVelocity(low), highVelocity(high)
+    {
+    }
+
+    bool acceptsVelocity(int midiVelocity) const
+    {
+        return midiVelocity >= lowVelocity && midiVelocity <= highVelocity;
+    }
+
+private:
+    int lowVelocity, highVelocity;
+};
+
+class VelocitySynthesiser final : public juce::Synthesiser
+{
+public:
+    void noteOn(int midiChannel, int midiNoteNumber, float velocity) override
+    {
+        const juce::ScopedLock scopedLock(lock);
+        const int midiVelocity = juce::jlimit(1, 127, juce::roundToInt(velocity * 127.0f));
+        for (int i = 0; i < getNumSounds(); ++i)
+        {
+            auto sound = getSound(i);
+            auto* mapped = static_cast<VelocitySamplerSound*>(sound.get());
+            if (mapped == nullptr || !mapped->appliesToNote(midiNoteNumber)
+                || !mapped->appliesToChannel(midiChannel)
+                || !mapped->acceptsVelocity(midiVelocity))
+                continue;
+            if (auto* voice = findFreeVoice(mapped, midiChannel, midiNoteNumber,
+                                            isNoteStealingEnabled()))
+                startVoice(voice, mapped, midiChannel, midiNoteNumber, velocity);
+        }
+    }
+};
+
+// Native sample-map player. A .psmap is plain JSON containing the original
+// samples' relative paths and their key/velocity zones. No Ableton code runs.
+class MultiSampleInstrumentProcessor final : public juce::AudioProcessor
+{
+public:
+    MultiSampleInstrumentProcessor(const juce::File& mapFile, juce::String& error)
+        : juce::AudioProcessor(juce::AudioProcessor::BusesProperties()
+                                   .withOutput("Stereo output", juce::AudioChannelSet::stereo(), true))
+    {
+        const auto manifest = juce::JSON::parse(mapFile.loadFileAsString());
+        auto* root = manifest.getDynamicObject();
+        if (root == nullptr || root->getProperty("schema").toString() != "playstage.multisample/1")
+        {
+            error = "Mapa .psmap invalido ou versao nao suportada.";
+            return;
+        }
+        const juce::var sampleArray = root->getProperty("samples");
+        auto* samples = sampleArray.getArray();
+        if (samples == nullptr || samples->isEmpty() || samples->size() > 256)
+        {
+            error = "Mapa sem samples ou com mais de 256 zonas.";
+            return;
+        }
+
+        name = root->getProperty("name").toString().trim();
+        if (name.isEmpty())
+            name = mapFile.getFileNameWithoutExtension();
+        formats.registerBasicFormats();
+        const auto base = mapFile.getParentDirectory();
+        juce::int64 totalBytes = 0;
+
+        // Validate every path before adding any sounds: no partially loaded map.
+        for (const auto& item : *samples)
+        {
+            auto* sampleObject = item.getDynamicObject();
+            if (sampleObject == nullptr)
+            {
+                error = "Zona de sample invalida.";
+                return;
+            }
+            const auto relative = sampleObject->getProperty("file").toString().replaceCharacter('\\', '/');
+            const juce::File sample = base.getChildFile(relative);
+            if (relative.isEmpty() || relative.startsWithChar('/') || relative.contains(":")
+                || relative.contains("../") || !sample.isAChildOf(base) || !sample.existsAsFile())
+            {
+                error = "Sample ausente ou caminho invalido: " + relative;
+                return;
+            }
+            totalBytes += sample.getSize();
+            if (totalBytes > 750LL * 1024 * 1024)
+            {
+                error = "Banco de samples excede o limite de 750 MB deste player.";
+                return;
+            }
+        }
+
+        for (int i = 0; i < 48; ++i)
+            synth.addVoice(new juce::SamplerVoice());
+        synth.setNoteStealingEnabled(true);
+        for (const auto& item : *samples)
+        {
+            auto* sampleObject = item.getDynamicObject();
+            const auto fileName = sampleObject->getProperty("file").toString();
+            const auto sampleFile = base.getChildFile(fileName);
+            const auto rootNote = int(sampleObject->getProperty("root"));
+            const auto low = int(sampleObject->getProperty("lo"));
+            const auto high = int(sampleObject->getProperty("hi"));
+            const auto velocityLow = int(sampleObject->getProperty("velLo"));
+            const auto velocityHigh = int(sampleObject->getProperty("velHi"));
+            if (rootNote < 0 || rootNote > 127 || low < 0 || high > 127 || low > high
+                || velocityLow < 1 || velocityHigh > 127 || velocityLow > velocityHigh)
+            {
+                error = "Regiao de nota/velocidade invalida no mapa.";
+                synth.clearSounds();
+                return;
+            }
+            std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(sampleFile));
+            if (reader == nullptr || reader->lengthInSamples < 1 || reader->sampleRate <= 0.0)
+            {
+                error = "Nao foi possivel decodificar: " + sampleFile.getFileName();
+                synth.clearSounds();
+                return;
+            }
+            juce::BigInteger notes;
+            notes.setRange(low, high - low + 1, true);
+            const double duration = juce::jmin(180.0,
+                static_cast<double>(reader->lengthInSamples) / reader->sampleRate + 1.0);
+            synth.addSound(new VelocitySamplerSound(sampleFile.getFileNameWithoutExtension(),
+                *reader, notes, rootNote, velocityLow, velocityHigh, duration));
+        }
+        loaded = synth.getNumSounds() == samples->size();
+    }
+
+    bool isLoaded() const { return loaded; }
+    const juce::String getName() const override { return name; }
+    void prepareToPlay(double sampleRate, int) override
+    {
+        synth.setCurrentPlaybackSampleRate(sampleRate);
+    }
+    void releaseResources() override { synth.allNotesOff(0, false); }
+    void processBlock(juce::AudioBuffer<float>& audio, juce::MidiBuffer& midi) override
+    {
+        audio.clear();
+        synth.renderNextBlock(audio, midi, 0, audio.getNumSamples());
+    }
+    bool isBusesLayoutSupported(const BusesLayout& layout) const override
+    {
+        return layout.getMainInputChannelSet().isDisabled()
+            && layout.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
+    }
+    bool acceptsMidi() const override { return true; }
+    bool producesMidi() const override { return false; }
+    bool isMidiEffect() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.3; }
+    bool hasEditor() const override { return false; }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return {}; }
+    void changeProgramName(int, const juce::String&) override {}
+    void getStateInformation(juce::MemoryBlock&) override {}
+    void setStateInformation(const void*, int) override {}
+
+private:
+    juce::AudioFormatManager formats;
+    VelocitySynthesiser synth;
+    juce::String name;
+    bool loaded = false;
+};
+
 class MasterProcessor final : public juce::AudioProcessor
 {
 public:
@@ -533,15 +708,23 @@ public:
     {
         const auto ext = file.getFileExtension().toLowerCase();
         const bool isSample = ext == ".wav" || ext == ".aif" || ext == ".aiff" || ext == ".flac";
+        const bool isMap = ext == ".psmap";
         if (!juce::isPositiveAndBelow(index, kSlots) || !file.exists()
-            || !(ext == ".vst3" || isSample))
+            || !(ext == ".vst3" || isSample || isMap))
         {
-            error = "Selecione um VST3 ou amostra WAV/AIFF/FLAC para macOS.";
+            error = "Selecione um VST3, amostra WAV/AIFF/FLAC ou mapa .psmap.";
             return false;
         }
 
         std::unique_ptr<juce::AudioProcessor> instance;
-        if (isSample)
+        if (isMap)
+        {
+            auto sample = std::make_unique<MultiSampleInstrumentProcessor>(file, error);
+            if (!sample->isLoaded())
+                return false;
+            instance = std::move(sample);
+        }
+        else if (isSample)
         {
             auto sample = std::make_unique<SampleInstrumentProcessor>(file, error);
             if (!sample->isLoaded())
@@ -834,13 +1017,13 @@ public:
         heading.setColour(juce::Label::textColourId, kLayerColours[static_cast<size_t>(channel)]);
         addAndMakeVisible(heading);
 
-        instrument.setText("+ VST3 / AMOSTRA", juce::dontSendNotification);
+        instrument.setText("+ VST3 / MULTISAMPLE", juce::dontSendNotification);
         instrument.setJustificationType(juce::Justification::centred);
         instrument.setFont(juce::Font(13.0f, juce::Font::bold));
         instrument.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(instrument);
 
-        loadButton.setButtonText("+ VST3 / WAV / AIFF");
+        loadButton.setButtonText("+ VST3 / MAPA .psmap");
         loadButton.onClick = [this] { onLoad(channel); };
         addAndMakeVisible(loadButton);
         editButton.setButtonText("Editor do plugin");
@@ -909,7 +1092,7 @@ public:
         mute.setToggleState(layer.muted, juce::dontSendNotification);
         solo.setToggleState(layer.solo, juce::dontSendNotification);
         transpose.setValue(layer.transpose, juce::dontSendNotification);
-        instrument.setText(layer.name.isEmpty() ? "+ VST3 / AMOSTRA" : layer.name,
+        instrument.setText(layer.name.isEmpty() ? "+ VST3 / MULTISAMPLE" : layer.name,
                            juce::dontSendNotification);
         editButton.setEnabled(juce::File(layer.file).hasFileExtension(".vst3"));
         applying = false;
@@ -921,7 +1104,7 @@ public:
         saved.name = name;
         saved.file = file;
         saved.pluginState.clear();
-        instrument.setText(name.isEmpty() ? "+ VST3 / AMOSTRA" : name,
+        instrument.setText(name.isEmpty() ? "+ VST3 / MULTISAMPLE" : name,
                            juce::dontSendNotification);
         editButton.setEnabled(juce::File(file).hasFileExtension(".vst3"));
     }
@@ -1009,7 +1192,7 @@ public:
         title.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(title);
 
-        subtitle.setText("VST3 + WAV / AIFF / AMOSTRAS ABLETON", juce::dontSendNotification);
+        subtitle.setText("VST3 + MAPAS MULTISAMPLE (.psmap) + WAV / AIFF", juce::dontSendNotification);
         subtitle.setFont(juce::Font(11.0f));
         subtitle.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         addAndMakeVisible(subtitle);
@@ -1045,7 +1228,7 @@ public:
         openButton.onClick = [this] { openPresetFile(); };
         addAndMakeVisible(openButton);
 
-        project.setText("AMOSTRAS ABLETON\n\nWAV / AIFF\n(.adg/.adv nao abrem)",
+        project.setText("BIBLIOTECA DE SAMPLES\n\nMAPAS .psmap\nWAV / AIFF\n(.adg/.adv nao abrem)",
                         juce::dontSendNotification);
         project.setJustificationType(juce::Justification::topLeft);
         project.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -1114,7 +1297,7 @@ public:
         addAndMakeVisible(pedalButton);
 
         status.setText(engine.getLastError().isEmpty()
-                           ? "Pronto. Carregue um VST3 ou arquivo de amostra WAV/AIFF. MIDI externo habilitado."
+                           ? "Pronto. Carregue VST3, .psmap ou WAV/AIFF. MIDI externo habilitado."
                            : engine.getLastError(), juce::dontSendNotification);
         status.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         addAndMakeVisible(status);
@@ -1618,7 +1801,8 @@ private:
             {
                 const auto item = iterator.getFile();
                 const auto ext = item.getFileExtension().toLowerCase();
-                if (ext == ".wav" || ext == ".aif" || ext == ".aiff" || ext == ".flac")
+                if (ext == ".wav" || ext == ".aif" || ext == ".aiff"
+                    || ext == ".flac" || ext == ".psmap")
                 {
                     libraryFiles.addIfNotAlreadyThere(item);
                     if (libraryFiles.size() >= 350)
@@ -1656,10 +1840,10 @@ private:
     void pickVst3(int index)
     {
         chooser = std::make_unique<juce::FileChooser>(
-            "Selecione um VST3 ou um sample WAV/AIFF do Ableton",
+            "Selecione um VST3, mapa .psmap ou sample WAV/AIFF",
             juce::File::getSpecialLocation(juce::File::userHomeDirectory)
                 .getChildFile("Music"),
-            "*.vst3;*.wav;*.aif;*.aiff;*.flac");
+            "*.vst3;*.psmap;*.wav;*.aif;*.aiff;*.flac");
 
         const auto flags = juce::FileBrowserComponent::openMode
                          | juce::FileBrowserComponent::canSelectFiles
@@ -1683,7 +1867,7 @@ private:
         {
             status.setText("Falha ao abrir instrumento: " + error, juce::dontSendNotification);
             juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                    "Instrumento VST3 / Amostra", error);
+                                                    "Instrumento VST3 / Multisample", error);
             return;
         }
         if (auto* plugin = engine.getPlugin(index))
@@ -1787,7 +1971,7 @@ class PlayStageApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "PlayStage VST3 Catalina"; }
-    const juce::String getApplicationVersion() override { return "0.4.0"; }
+    const juce::String getApplicationVersion() override { return "0.5.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override
     {

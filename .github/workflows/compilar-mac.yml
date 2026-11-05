@@ -35,12 +35,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view v0.4.0-catalina-prealpha >/dev/null 2>&1; then
-            gh release upload v0.4.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip --clobber
+          if gh release view v0.5.0-catalina-prealpha >/dev/null 2>&1; then
+            gh release upload v0.5.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip --clobber
           else
-            gh release create v0.4.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip \
-              --title "PlayStage Live 0.4 - VST3 + Samples Ableton (pre-alfa)" \
-              --notes "Agora somente VST3 (Audio Unit removido); sem MainStage. Motor nativo de samples WAV/AIFF/FLAC da biblioteca Ableton, mapeados cromaticamente a partir da nota MIDI 60, alem de dez programas, quatro camadas, zonas MIDI, EQ, envelope, reverb e master. Sem suporte direto a .adg/.adv/.alp/.als/.amxd nem conversao de presets do Live. Alvo macOS Intel 10.15. Teste antes de uso ao vivo." \
+            gh release create v0.5.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip \
+              --title "PlayStage Live 0.5 - VST3 + Multisample Ableton (pre-alfa)" \
+              --notes "Importador .psmap com zonas de notas e 5 camadas de velocidade; validado com 152 samples de um Live 11.3.11 fornecido pelo usuario. O programa nao inclui nem redistribui os samples originais. Para usar este projeto, gere mapas locais com tools/import_ableton_live11.py, preservando a pasta Samples/ ao lado deles. Sem suporte de execucao a .adg/.adv/.alp/.als/.amxd nem DSP nativo do Live; sem Audio Unit/MainStage. 4 camadas, MIDI externo, VST3, macOS Intel 10.15. Experimental, teste antes de usar ao vivo." \
               --prerelease --target "${GITHUB_SHA}"
           fi
 

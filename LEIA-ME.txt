@@ -1,4 +1,4 @@
-PLAYSTAGE LIVE CATALINA - VERSAO 0.4 (PRE-ALFA)
+PLAYSTAGE LIVE CATALINA - VERSAO 0.5 (PRE-ALFA)
 ================================================
 
 O aplicativo foi compilado para Intel com alvo macOS 10.15, mas ainda nao
@@ -8,23 +8,38 @@ O que pode tocar:
 - Instrumentos VST3 compativeis com Mac Intel e macOS Catalina.
 - Samples de audio WAV ou AIFF (.wav, .aif, .aiff) de bibliotecas Ableton
   que voce possua e possa utilizar. FLAC depende do decoder disponivel.
-- Uma amostra por camada, mapeada cromaticamente para o teclado MIDI externo,
-  com nota base C4 (MIDI 60), 16 vozes e duracao maxima de 30 segundos.
+- Uma amostra por camada com nota base MIDI 60; ou um mapa .psmap de ate
+  256 amostras com regioes de notas e de velocidade (48 vozes por camada).
 - Quatro camadas em paralelo, com volumes, filtro, EQ, drive, rotary, envelope,
   zona MIDI, velocity, master, reverb, pedal e PANIC.
-- Dez programas por banco .psstage, incluindo caminhos dos samples e VST3.
+- Dez programas por banco .psstage, incluindo caminhos de .psmap e VST3.
+
+IMPORTACAO DOS TIMBRES DO LIVE 11.3 (PROJETO ENVIADO)
+- O importador tools/import_ableton_live11.py foi testado no ZIP fornecido.
+- Astoria Grand XL: 110 amostras, 22 notas raiz, cinco velocidades.
+- Oberheim Swell: 10 regioes com zonas de teclado originais.
+- Shimer + Big Sky: 16 regioes com zonas de teclado originais.
+- Drum Pad: 16 sons nas teclas MIDI 77..92 do Drum Rack.
+- Os quatro mapas .psmap podem ser carregados no app SEM Python no Mac.
+- Extraia seu ZIP no Mac; copie os quatro .psmap para a pasta do projeto,
+  ao lado do .als e da subpasta Samples/Imported. Abra os mapas no PlayStage.
+- Caso queira gerar mapas em outro computador com Python 3:
+  python3 tools/import_ableton_live11.py "projeto.zip" --out "pasta" --extract-samples
+  (Os samples ficam SOMENTE na pasta local; nao vao para o GitHub.)
 
 Biblioteca Ableton:
-- O painel esquerdo busca WAV/AIFF em ~/Music/Ableton/User Library,
+- O painel esquerdo busca WAV/AIFF/.psmap em ~/Music/Ableton/User Library,
   ~/Music/Ableton/Factory Packs e ~/Music/Ableton (se existirem).
 - O botao "Escolher pasta" permite indexar uma pasta personalizada com
   audio ja disponivel no disco, sem modificar ou extrair os arquivos.
 - Escolha o destino CAMADA 1..4 e de duplo clique em um sample para carrega-lo.
-- Uma amostra isolada NAO e um preset multiamostral de Sampler ou Simpler.
+- Uma amostra isolada nao reconstrói um preset multiamostral. Use .psmap.
 
 Formatos Ableton que NAO tocamos diretamente:
 - .adg (Racks), .adv (presets de device), .alp (packs nao instalados),
-  .als (sets), .amxd (Max for Live). Esses arquivos dependem de recursos
+  .als (sets), .amxd (Max for Live). O script LE o XML do .als para
+  montar mapas .psmap, mas o aplicativo NAO reproduz diretamente .als.
+  Esses formatos dependem de recursos
   internos do Live para serem reproduzidos fielmente.
 - A conversao automatica de instrumentos Ableton para VST3 nao existe aqui.
 - Nao inclua samples protegidos por direitos ou licencas que impeçam o uso.
@@ -35,17 +50,22 @@ Recursos removidos nesta versao, conforme solicitado:
 - Teclado virtual (foi removido na versao anterior).
 
 Instalacao:
-1. Baixe PlayStage_VST3_Catalina_Intel.zip na Release da versao 0.4.
+1. Baixe PlayStage_VST3_Catalina_Intel.zip na Release da versao 0.5.
 2. Extraia o arquivo e copie o aplicativo para /Aplicativos.
 3. Abra o aplicativo, ajuste "Audio / MIDI" e conecte teclado MIDI externo.
-4. Use "+ VST3 / WAV / AIFF" ou a lista "AMOSTRAS ABLETON".
+4. Use "+ VST3 / MAPA .psmap" ou a lista de samples e mapas.
 5. Salve um banco em .psstage para restaurar instrumentos e camadas.
 
 Para compilar pelo Mac, se tiver Xcode/CMake:
   bash COMPILAR_CATALINA.command
 
 Importante:
-- O sampler nao importa os parametros e mapas das bibliotecas Ableton.
+- O sampler importa regioes MIDI e velocity, mas NAO reproduz fielmente os
+  efeitos exclusivos do Ableton, loops, warp e automacoes do Live.
+- Alguns arquivos .adg/.adv de presets referenciados nao vieram no projeto.
+- Tres dispositivos ValhallaSupermassive constam no .als; instale o VST3
+  compatível por conta propria se quiser aproximar os efeitos.
+- As 110 amostras Astoria vieram no ZIP mas nao eram um device ativo no .als.
 - Os samples de um .alp devem estar previamente instalados com o Ableton,
   conforme os termos da sua licenca; o PlayStage nao abre o .alp.
 - Plugins VST3 Windows nao funcionam no macOS.
