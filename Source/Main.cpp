@@ -289,7 +289,7 @@ public:
     {
         synth.setCurrentPlaybackSampleRate(sampleRate);
     }
-    void releaseResources() override { synth.allSoundsOff(1, false); }
+    void releaseResources() override { synth.allNotesOff(0, false); }
     void processBlock(juce::AudioBuffer<float>& audio, juce::MidiBuffer& midi) override
     {
         audio.clear();
