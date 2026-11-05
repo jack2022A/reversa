@@ -9,7 +9,7 @@ jobs:
   app-macos:
     runs-on: macos-15-intel
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Baixar fontes
         uses: actions/checkout@v4
@@ -29,8 +29,24 @@ jobs:
           codesign --force --deep --sign - "$app_path"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" PlayStage_VST3_Catalina_Intel.zip
 
+      - name: Publicar compilacao pre-alfa no GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v0.1.0-catalina-prealpha >/dev/null 2>&1; then
+            gh release upload v0.1.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip --clobber
+          else
+            gh release create v0.1.0-catalina-prealpha PlayStage_VST3_Catalina_Intel.zip \
+              --title "PlayStage VST3 Catalina - pre-alfa" \
+              --notes "Aplicativo nativo Intel. Compilado para deployment target macOS 10.15. Nao testado em Catalina ou com VST3 de terceiros. Baixe por sua conta e risco, teste sem uso ao vivo." \
+              --prerelease --target "${GITHUB_SHA}"
+          fi
+
       - name: Baixar app pronto em Actions / Artifacts
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: PlayStage-VST3-Catalina-Intel
           path: PlayStage_VST3_Catalina_Intel.zip
