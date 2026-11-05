@@ -9,12 +9,12 @@
 namespace
 {
 constexpr int kSlots = 4;
-const juce::Colour kBackground = juce::Colour(0xff120d17);
-const juce::Colour kPanel = juce::Colour(0xff251926);
-const juce::Colour kAccent = juce::Colour(0xffc45e87);
+const juce::Colour kBackground = juce::Colour(0xff091a30);
+const juce::Colour kPanel = juce::Colour(0xff183457);
+const juce::Colour kAccent = juce::Colour(0xff69b8f6);
 const std::array<juce::Colour, kSlots> kLayerColours {
-    juce::Colour(0xffcf527e), juce::Colour(0xff37b4d0),
-    juce::Colour(0xff9a75cd), juce::Colour(0xffe5b34c)
+    juce::Colour(0xffbfe4ff), juce::Colour(0xff65bcfc),
+    juce::Colour(0xff83a9ed), juce::Colour(0xffeef8ff)
 };
 
 struct LayerPreset
@@ -23,6 +23,14 @@ struct LayerPreset
     float volume = 0.8f, cutoff = 20000.0f;
     bool muted = false, solo = false;
     int transpose = 0;
+    int noteLow = 0, noteHigh = 127, midiChannel = 0;
+    float velocityCurve = 1.0f, velocityGain = 1.0f;
+    int velocityMin = 1, velocityMax = 127;
+    float eqLow = 0.0f, eqMid = 0.0f, eqHigh = 0.0f;
+    float attackMs = 10.0f, releaseMs = 300.0f;
+    bool envelopeOn = false, driveOn = false, rotaryOn = false;
+    float drive = 0.25f, driveMix = 0.2f;
+    float reverbSend = 0.0f, rotaryHz = 3.0f;
 };
 
 struct ProgramPreset
@@ -44,30 +52,97 @@ public:
 
     void setLinearGain(float value) { gain.store(juce::jlimit(0.0f, 1.5f, value)); }
     void setCutoff(float value) { cutoff.store(juce::jlimit(200.0f, 20000.0f, value)); }
+    void setGateSource(const std::atomic<int>* notes) { gateNotes = notes; }
+    void setTone(const LayerPreset& state)
+    {
+        eqLow.store(state.eqLow);
+        eqMid.store(state.eqMid);
+        eqHigh.store(state.eqHigh);
+        attackMs.store(state.attackMs);
+        releaseMs.store(state.releaseMs);
+        envelopeOn.store(state.envelopeOn);
+        driveOn.store(state.driveOn);
+        drive.store(state.drive);
+        driveMix.store(state.driveMix);
+        rotaryOn.store(state.rotaryOn);
+        rotaryHz.store(state.rotaryHz);
+        reverbSend.store(state.reverbSend);
+    }
     float getLevel() const { return peak.load(); }
     const juce::String getName() const override { return "Volume PlayStage"; }
     void prepareToPlay(double sampleRate, int) override
     {
         rate = sampleRate;
-        state = { 0.0f, 0.0f };
+        filterState = { 0.0f, 0.0f };
+        eqLowState = { 0.0f, 0.0f };
+        eqHighState = { 0.0f, 0.0f };
+        envelopeLevel = 0.0f;
+        layerReverb.setSampleRate(sampleRate);
+        layerReverb.reset();
+        previousSend = -1.0f;
     }
-    void releaseResources() override { state = { 0.0f, 0.0f }; }
+    void releaseResources() override { layerReverb.reset(); }
     void processBlock(juce::AudioBuffer<float>& audio, juce::MidiBuffer&) override
     {
-        const auto hz = static_cast<double>(cutoff.load());
-        const auto alpha = static_cast<float>(std::exp(-juce::MathConstants<double>::twoPi
-                                                     * hz / juce::jmax(1.0, rate)));
+        const auto radians = juce::MathConstants<double>::twoPi / juce::jmax(1.0, rate);
+        const auto alpha = static_cast<float>(std::exp(-radians * cutoff.load()));
+        const auto lowAlpha = static_cast<float>(std::exp(-radians * 240.0));
+        const auto highAlpha = static_cast<float>(std::exp(-radians * 4100.0));
         const auto inputGain = gain.load();
-        for (int channel = 0; channel < juce::jmin(audio.getNumChannels(), 2); ++channel)
+        const auto lowGain = juce::Decibels::decibelsToGain(eqLow.load());
+        const auto midGain = juce::Decibels::decibelsToGain(eqMid.load());
+        const auto highGain = juce::Decibels::decibelsToGain(eqHigh.load());
+        const bool useDrive = driveOn.load();
+        const float driveMultiplier = 1.0f + drive.load() * 8.0f;
+        const float driveBlend = driveMix.load();
+        const float driveNormalizer = std::tanh(driveMultiplier);
+        const float attackStep = 1000.0f / static_cast<float>(juce::jmax(1.0, rate) * juce::jmax(1.0f, attackMs.load()));
+        const float releaseStep = 1000.0f / static_cast<float>(juce::jmax(1.0, rate) * juce::jmax(1.0f, releaseMs.load()));
+        const bool useEnvelope = envelopeOn.load();
+        const bool useRotary = rotaryOn.load();
+        const float rotaryStep = static_cast<float>(radians * rotaryHz.load());
+        const int channels = juce::jmin(audio.getNumChannels(), 2);
+        for (int i = 0; i < audio.getNumSamples(); ++i)
         {
-            auto* samples = audio.getWritePointer(channel);
-            auto& last = state[static_cast<size_t>(channel)];
-            for (int i = 0; i < audio.getNumSamples(); ++i)
+            if (useEnvelope)
             {
-                last = (1.0f - alpha) * samples[i] + alpha * last;
-                samples[i] = last * inputGain;
+                const bool gate = gateNotes != nullptr && gateNotes->load() > 0;
+                envelopeLevel = juce::jlimit(0.0f, 1.0f, envelopeLevel + (gate ? attackStep : -releaseStep));
+            }
+            const float tremolo = useRotary ? (0.73f + 0.27f * std::sin(rotaryPhase)) : 1.0f;
+            rotaryPhase += rotaryStep;
+            if (rotaryPhase >= juce::MathConstants<float>::twoPi)
+                rotaryPhase -= juce::MathConstants<float>::twoPi;
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                auto& last = filterState[static_cast<size_t>(channel)];
+                auto& low = eqLowState[static_cast<size_t>(channel)];
+                auto& high = eqHighState[static_cast<size_t>(channel)];
+                auto* samples = audio.getWritePointer(channel);
+                const float x = samples[i];
+                low = (1.0f - lowAlpha) * x + lowAlpha * low;
+                high = (1.0f - highAlpha) * x + highAlpha * high;
+                float shaped = low * lowGain + (high - low) * midGain + (x - high) * highGain;
+                last = (1.0f - alpha) * shaped + alpha * last;
+                shaped = last;
+                if (useDrive)
+                    shaped = shaped * (1.0f - driveBlend)
+                           + (std::tanh(shaped * driveMultiplier) / driveNormalizer) * driveBlend;
+                samples[i] = shaped * inputGain * (useEnvelope ? envelopeLevel : 1.0f) * tremolo;
             }
         }
+        const float send = reverbSend.load();
+        if (send != previousSend)
+        {
+            juce::Reverb::Parameters p;
+            p.wetLevel = juce::jlimit(0.0f, 0.65f, send);
+            p.dryLevel = 1.0f;
+            p.roomSize = 0.48f;
+            layerReverb.setParameters(p);
+            previousSend = send;
+        }
+        if (channels == 2)
+            layerReverb.processStereo(audio.getWritePointer(0), audio.getWritePointer(1), audio.getNumSamples());
         peak.store(juce::jmax(audio.getMagnitude(0, audio.getNumSamples()), peak.load() * 0.9f));
     }
     bool isBusesLayoutSupported(const BusesLayout& layout) const override
@@ -93,7 +168,15 @@ private:
     std::atomic<float> gain { 0.8f };
     std::atomic<float> cutoff { 20000.0f };
     std::atomic<float> peak { 0.0f };
-    std::array<float, 2> state { 0.0f, 0.0f };
+    std::atomic<float> eqLow { 0.0f }, eqMid { 0.0f }, eqHigh { 0.0f };
+    std::atomic<float> attackMs { 10.0f }, releaseMs { 300.0f };
+    std::atomic<float> drive { 0.25f }, driveMix { 0.2f }, reverbSend { 0.0f }, rotaryHz { 3.0f };
+    std::atomic<bool> envelopeOn { false }, driveOn { false }, rotaryOn { false };
+    std::array<float, 2> filterState { 0.0f, 0.0f };
+    std::array<float, 2> eqLowState { 0.0f, 0.0f }, eqHighState { 0.0f, 0.0f };
+    const std::atomic<int>* gateNotes = nullptr;
+    juce::Reverb layerReverb;
+    float previousSend = -1.0f, envelopeLevel = 0.0f, rotaryPhase = 0.0f;
     double rate = 44100.0;
 };
 
@@ -101,6 +184,17 @@ class MidiLayerProcessor final : public juce::AudioProcessor
 {
 public:
     void setTranspose(int semitones) { transpose.store(juce::jlimit(-24, 24, semitones)); }
+    void setZone(const LayerPreset& state)
+    {
+        noteLow.store(juce::jlimit(0, 127, state.noteLow));
+        noteHigh.store(juce::jlimit(0, 127, state.noteHigh));
+        midiChannel.store(juce::jlimit(0, 16, state.midiChannel));
+        velocityCurve.store(juce::jlimit(0.25f, 3.0f, state.velocityCurve));
+        velocityGain.store(juce::jlimit(0.0f, 2.0f, state.velocityGain));
+        velocityMin.store(juce::jlimit(1, 127, state.velocityMin));
+        velocityMax.store(juce::jlimit(1, 127, state.velocityMax));
+    }
+    const std::atomic<int>* getNoteCount() const { return &activeNotes; }
     const juce::String getName() const override { return "PlayStage MIDI Zone"; }
     void prepareToPlay(double, int) override {}
     void releaseResources() override {}
@@ -111,8 +205,29 @@ public:
         for (const auto metadata : events)
         {
             auto midi = metadata.getMessage();
+            const int channelFilter = midiChannel.load();
+            if (channelFilter > 0 && midi.getChannel() > 0 && midi.getChannel() != channelFilter)
+                continue;
             if (midi.isNoteOnOrOff())
+            {
+                if (midi.getNoteNumber() < noteLow.load() || midi.getNoteNumber() > noteHigh.load())
+                    continue;
+                if (midi.isNoteOn())
+                {
+                    const float normalised = static_cast<float>(midi.getVelocity()) / 127.0f;
+                    const float curved = std::pow(normalised, velocityCurve.load()) * velocityGain.load();
+                    const int minV = velocityMin.load(), maxV = velocityMax.load();
+                    const int scaled = minV + juce::roundToInt(juce::jlimit(0.0f, 1.0f, curved)
+                                                           * static_cast<float>(juce::jmax(0, maxV - minV)));
+                    midi.setVelocity(static_cast<float>(juce::jlimit(1, 127, scaled)) / 127.0f);
+                    activeNotes.fetch_add(1);
+                }
+                else
+                    activeNotes.store(juce::jmax(0, activeNotes.load() - 1));
                 midi.setNoteNumber(juce::jlimit(0, 127, midi.getNoteNumber() + shift));
+            }
+            if (midi.isController() && (midi.getControllerNumber() == 120 || midi.getControllerNumber() == 123))
+                activeNotes.store(0);
             output.addEvent(midi, metadata.samplePosition);
         }
         events.swapWith(output);
@@ -133,6 +248,9 @@ public:
 
 private:
     std::atomic<int> transpose { 0 };
+    std::atomic<int> noteLow { 0 }, noteHigh { 127 }, midiChannel { 0 };
+    std::atomic<int> velocityMin { 1 }, velocityMax { 127 }, activeNotes { 0 };
+    std::atomic<float> velocityCurve { 1.0f }, velocityGain { 1.0f };
 };
 
 class MasterProcessor final : public juce::AudioProcessor
@@ -211,6 +329,9 @@ public:
     HostEngine()
     {
         pluginFormats.addFormat(std::make_unique<juce::VST3PluginFormat>());
+#if JUCE_PLUGINHOST_AU
+        pluginFormats.addFormat(std::make_unique<juce::AudioUnitPluginFormat>());
+#endif
         graph = std::make_unique<juce::AudioProcessorGraph>();
         graph->setPlayConfigDetails(0, 2, 44100.0, 512);
 
@@ -235,6 +356,7 @@ public:
                                      juce::AudioProcessorGraph::midiChannelIndex } });
 
             auto volume = std::make_unique<VolumeProcessor>();
+            volume->setGateSource(midiProcessors[static_cast<size_t>(i)]->getNoteCount());
             volumes[static_cast<size_t>(i)] = volume.get();
             volumeNodes[static_cast<size_t>(i)] = graph->addNode(std::move(volume));
             connectVolumeToOutput(i);
@@ -278,17 +400,18 @@ public:
         player.getMidiMessageCollector().addMessageToQueue(message);
     }
 
-    void setLayerSettings(int index, float gain, bool muted, bool solo,
-                          float cutoffHz, int transpose)
+    void setLayerSettings(int index, const LayerPreset& settings)
     {
         if (juce::isPositiveAndBelow(index, kSlots))
         {
             const auto pos = static_cast<size_t>(index);
-            layerVolumes[pos] = gain;
-            layerMuted[pos] = muted;
-            layerSolo[pos] = solo;
-            volumes[pos]->setCutoff(cutoffHz);
-            midiProcessors[pos]->setTranspose(transpose);
+            layerVolumes[pos] = settings.volume;
+            layerMuted[pos] = settings.muted;
+            layerSolo[pos] = settings.solo;
+            volumes[pos]->setCutoff(settings.cutoff);
+            volumes[pos]->setTone(settings);
+            midiProcessors[pos]->setTranspose(settings.transpose);
+            midiProcessors[pos]->setZone(settings);
             refreshGains();
         }
     }
@@ -341,21 +464,31 @@ public:
         return nullptr;
     }
 
-    bool loadVst3(int index, const juce::File& vst3, juce::String& error)
+    bool loadInstrument(int index, const juce::File& file, juce::String& error)
     {
-        if (!juce::isPositiveAndBelow(index, kSlots) || !vst3.exists()
-            || !vst3.hasFileExtension(".vst3"))
+        if (!juce::isPositiveAndBelow(index, kSlots) || !file.exists()
+            || !(file.hasFileExtension(".vst3") || file.hasFileExtension(".component")))
         {
-            error = "Selecione um plugin .vst3 valido para macOS.";
+            error = "Selecione um instrumento .vst3 ou .component valido para macOS.";
             return false;
         }
 
         juce::OwnedArray<juce::PluginDescription> candidates;
+        const bool isAu = file.hasFileExtension(".component");
+#if JUCE_PLUGINHOST_AU
+        auto* format = pluginFormats.getFormat(isAu ? 1 : 0);
+#else
+        if (isAu)
+        {
+            error = "Hospedagem de Audio Units indisponivel nesta compilacao.";
+            return false;
+        }
         auto* format = pluginFormats.getFormat(0);
-        format->findAllTypesForFile(candidates, vst3.getFullPathName());
+#endif
+        format->findAllTypesForFile(candidates, file.getFullPathName());
         if (candidates.isEmpty())
         {
-            error = "Nao foi encontrado um plugin VST3 compativel neste arquivo.";
+            error = "Nao foi encontrado um instrumento compativel neste plugin.";
             return false;
         }
 
@@ -480,34 +613,177 @@ public:
     void closeButtonPressed() override { setVisible(false); }
 };
 
+class LayerSettingsComponent final : public juce::Component
+{
+public:
+    LayerSettingsComponent(int layerIndex, LayerPreset current,
+                           std::function<void(const LayerPreset&)> changed)
+        : layer(current), onChanged(std::move(changed))
+    {
+        title.setText("CAMADA " + juce::String(layerIndex + 1) + " / AJUSTES AVANCADOS",
+                      juce::dontSendNotification);
+        title.setFont(juce::Font(21.0f, juce::Font::bold));
+        title.setColour(juce::Label::textColourId, juce::Colours::white);
+        addAndMakeVisible(title);
+        hint.setText("Zona MIDI, dinamica e efeitos em tempo real", juce::dontSendNotification);
+        hint.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+        addAndMakeVisible(hint);
+
+        addSetting(0, "Nota inicial", 0, 127, layer.noteLow, 1);
+        addSetting(1, "Nota final", 0, 127, layer.noteHigh, 1);
+        addSetting(2, "Canal MIDI (0=todos)", 0, 16, layer.midiChannel, 1);
+        addSetting(3, "Transpose (semitons)", -12, 12, layer.transpose, 1);
+        addSetting(4, "Curva velocidade", 0.25, 3.0, layer.velocityCurve, 0.05);
+        addSetting(5, "Ganho velocidade", 0, 2, layer.velocityGain, 0.05);
+        addSetting(6, "Velocity minima", 1, 127, layer.velocityMin, 1);
+        addSetting(7, "Velocity maxima", 1, 127, layer.velocityMax, 1);
+        addSetting(8, "EQ graves (dB)", -12, 12, layer.eqLow, 0.1);
+        addSetting(9, "EQ medios (dB)", -12, 12, layer.eqMid, 0.1);
+        addSetting(10, "EQ agudos (dB)", -12, 12, layer.eqHigh, 0.1);
+        addSetting(11, "Attack (ms)", 1, 3000, layer.attackMs, 1);
+        addSetting(12, "Release (ms)", 1, 5000, layer.releaseMs, 1);
+        addSetting(13, "Drive", 0, 1, layer.drive, 0.01);
+        addSetting(14, "Mistura drive", 0, 1, layer.driveMix, 0.01);
+        addSetting(15, "Envio de reverb", 0, 0.65, layer.reverbSend, 0.01);
+        addSetting(16, "Rotary velocidade Hz", 0.5, 9, layer.rotaryHz, 0.1);
+        addSetting(17, "Filtro cutoff (Hz)", 200, 20000, layer.cutoff, 1);
+
+        envelope.setButtonText("ENVELOPE / LIGADO");
+        envelope.setToggleState(layer.envelopeOn, juce::dontSendNotification);
+        envelope.onClick = [this] { update(); };
+        addAndMakeVisible(envelope);
+        driveEnabled.setButtonText("DRIVE / LIGADO");
+        driveEnabled.setToggleState(layer.driveOn, juce::dontSendNotification);
+        driveEnabled.onClick = [this] { update(); };
+        addAndMakeVisible(driveEnabled);
+        rotary.setButtonText("ROTARY / LIGADO");
+        rotary.setToggleState(layer.rotaryOn, juce::dontSendNotification);
+        rotary.onClick = [this] { update(); };
+        addAndMakeVisible(rotary);
+        note.setText("Alteracoes aplicadas no som e salvas no banco .psstage.",
+                     juce::dontSendNotification);
+        note.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        addAndMakeVisible(note);
+        setSize(830, 715);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(kBackground);
+        g.setColour(kAccent);
+        g.fillRect(0, 0, getWidth(), 4);
+        g.setColour(juce::Colour(0xff315679));
+        g.drawVerticalLine(getWidth() / 2, 89.0f, 625.0f);
+    }
+
+    void resized() override
+    {
+        title.setBounds(20, 15, getWidth() - 30, 33);
+        hint.setBounds(21, 50, getWidth() - 30, 24);
+        const int leftWidth = getWidth() / 2 - 33;
+        for (int i = 0; i < static_cast<int>(sliders.size()); ++i)
+        {
+            const int col = i / 9;
+            const int row = i % 9;
+            const int x = 18 + col * (getWidth() / 2);
+            const int y = 94 + row * 56;
+            captions[static_cast<size_t>(i)]->setBounds(x, y, leftWidth, 19);
+            sliders[static_cast<size_t>(i)]->setBounds(x, y + 18, leftWidth, 29);
+        }
+        envelope.setBounds(23, 608, 205, 30);
+        driveEnabled.setBounds(252, 608, 205, 30);
+        rotary.setBounds(482, 608, 205, 30);
+        note.setBounds(22, 659, getWidth() - 40, 22);
+    }
+
+private:
+    void addSetting(int index, const juce::String& caption, double min,
+                    double max, double current, double step)
+    {
+        auto label = std::make_unique<juce::Label>();
+        label->setText(caption, juce::dontSendNotification);
+        label->setFont(juce::Font(12.0f));
+        label->setColour(juce::Label::textColourId, juce::Colours::white);
+        addAndMakeVisible(*label);
+        captions[static_cast<size_t>(index)] = std::move(label);
+        auto slider = std::make_unique<juce::Slider>();
+        slider->setSliderStyle(juce::Slider::LinearHorizontal);
+        slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 63, 24);
+        slider->setRange(min, max, step);
+        slider->setValue(current, juce::dontSendNotification);
+        slider->setColour(juce::Slider::thumbColourId, kAccent);
+        slider->onValueChange = [this] { update(); };
+        addAndMakeVisible(*slider);
+        sliders[static_cast<size_t>(index)] = std::move(slider);
+    }
+
+    void update()
+    {
+        auto v = [this](int index) { return sliders[static_cast<size_t>(index)]->getValue(); };
+        layer.noteLow = static_cast<int>(v(0));
+        layer.noteHigh = juce::jmax(layer.noteLow, static_cast<int>(v(1)));
+        layer.midiChannel = static_cast<int>(v(2));
+        layer.transpose = static_cast<int>(v(3));
+        layer.velocityCurve = static_cast<float>(v(4));
+        layer.velocityGain = static_cast<float>(v(5));
+        layer.velocityMin = static_cast<int>(v(6));
+        layer.velocityMax = juce::jmax(layer.velocityMin, static_cast<int>(v(7)));
+        layer.eqLow = static_cast<float>(v(8));
+        layer.eqMid = static_cast<float>(v(9));
+        layer.eqHigh = static_cast<float>(v(10));
+        layer.attackMs = static_cast<float>(v(11));
+        layer.releaseMs = static_cast<float>(v(12));
+        layer.drive = static_cast<float>(v(13));
+        layer.driveMix = static_cast<float>(v(14));
+        layer.reverbSend = static_cast<float>(v(15));
+        layer.rotaryHz = static_cast<float>(v(16));
+        layer.cutoff = static_cast<float>(v(17));
+        layer.envelopeOn = envelope.getToggleState();
+        layer.driveOn = driveEnabled.getToggleState();
+        layer.rotaryOn = rotary.getToggleState();
+        onChanged(layer);
+    }
+
+    LayerPreset layer;
+    std::function<void(const LayerPreset&)> onChanged;
+    juce::Label title, hint, note;
+    std::array<std::unique_ptr<juce::Label>, 18> captions;
+    std::array<std::unique_ptr<juce::Slider>, 18> sliders;
+    juce::ToggleButton envelope, driveEnabled, rotary;
+};
+
 class ChannelStrip final : public juce::Component
 {
 public:
     ChannelStrip(int channelNumber, std::function<void(int)> load,
                  std::function<void(int)> edit,
                  std::function<void(int)> clear,
+                 std::function<void(int)> advanced,
                  std::function<void(int, const LayerPreset&)> changed)
         : channel(channelNumber), onLoad(std::move(load)), onEdit(std::move(edit)),
-          onClear(std::move(clear)), onChanged(std::move(changed))
+          onClear(std::move(clear)), onAdvanced(std::move(advanced)), onChanged(std::move(changed))
     {
         heading.setText("CAMADA " + juce::String(channel + 1), juce::dontSendNotification);
         heading.setFont(juce::Font(14.0f, juce::Font::bold));
         heading.setColour(juce::Label::textColourId, kLayerColours[static_cast<size_t>(channel)]);
         addAndMakeVisible(heading);
 
-        instrument.setText("+ Instrumento VST3", juce::dontSendNotification);
+        instrument.setText("+ Instrumento VST3 / AU", juce::dontSendNotification);
         instrument.setJustificationType(juce::Justification::centred);
         instrument.setFont(juce::Font(13.0f, juce::Font::bold));
         instrument.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(instrument);
 
-        loadButton.setButtonText("+ Adicionar VST3");
+        loadButton.setButtonText("+ Escolher VST3 / AU");
         loadButton.onClick = [this] { onLoad(channel); };
         addAndMakeVisible(loadButton);
-        editButton.setButtonText("Editar plugin");
+        editButton.setButtonText("Editor do plugin");
         editButton.onClick = [this] { onEdit(channel); };
         editButton.setEnabled(false);
         addAndMakeVisible(editButton);
+        settingsButton.setButtonText("AJUSTES DA CAMADA");
+        settingsButton.onClick = [this] { onAdvanced(channel); };
+        addAndMakeVisible(settingsButton);
         clearButton.setButtonText("X");
         clearButton.onClick = [this] { onClear(channel); };
         addAndMakeVisible(clearButton);
@@ -567,7 +843,7 @@ public:
         mute.setToggleState(layer.muted, juce::dontSendNotification);
         solo.setToggleState(layer.solo, juce::dontSendNotification);
         transpose.setValue(layer.transpose, juce::dontSendNotification);
-        instrument.setText(layer.name.isEmpty() ? "+ Instrumento VST3" : layer.name,
+        instrument.setText(layer.name.isEmpty() ? "+ Instrumento VST3 / AU" : layer.name,
                            juce::dontSendNotification);
         editButton.setEnabled(layer.file.isNotEmpty());
         applying = false;
@@ -579,7 +855,7 @@ public:
         saved.name = name;
         saved.file = file;
         saved.pluginState.clear();
-        instrument.setText(name.isEmpty() ? "+ Instrumento VST3" : name,
+        instrument.setText(name.isEmpty() ? "+ Instrumento VST3 / AU" : name,
                            juce::dontSendNotification);
         editButton.setEnabled(file.isNotEmpty());
     }
@@ -602,7 +878,7 @@ public:
         g.fillRect(meterBounds.getX() + 2, meterBounds.getBottom() - pixels,
                    meterBounds.getWidth() - 4, pixels);
 
-        g.setColour(juce::Colours::lightgrey.withAlpha(0.7f));
+        g.setColour(juce::Colours::white.withAlpha(0.8f));
         g.setFont(11.0f);
         g.drawText("VOLUME", 28, getHeight() - 69, 80, 15, juce::Justification::centred);
         g.drawText("FILTRO", getWidth() - 98, getHeight() - 69, 80, 15,
@@ -625,6 +901,8 @@ public:
         loadButton.setBounds(area.removeFromTop(30));
         area.removeFromTop(7);
         editButton.setBounds(area.removeFromTop(28));
+        area.removeFromTop(6);
+        settingsButton.setBounds(area.removeFromTop(32));
 
         auto bottom = area.removeFromBottom(50);
         transpose.setBounds(bottom.removeFromBottom(32));
@@ -645,29 +923,27 @@ private:
     bool applying = false;
     float meter = 0.0f;
     LayerPreset saved;
-    std::function<void(int)> onLoad, onEdit, onClear;
+    std::function<void(int)> onLoad, onEdit, onClear, onAdvanced;
     std::function<void(int, const LayerPreset&)> onChanged;
     juce::Label heading, instrument;
-    juce::TextButton loadButton, editButton, clearButton;
+    juce::TextButton loadButton, editButton, settingsButton, clearButton;
     juce::Slider volume, cutoff, transpose;
     juce::ToggleButton mute, solo;
 };
 
 class MainComponent final : public juce::Component,
                             public juce::ListBoxModel,
-                            private juce::MidiKeyboardStateListener,
                             private juce::Timer
 {
 public:
-    MainComponent() : keyboard(keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard),
-                      libraryList("Biblioteca MainStage", this)
+    MainComponent() : libraryList("Biblioteca MainStage", this)
     {
-        title.setText("PLAYSTAGE LIVE", juce::dontSendNotification);
+        title.setText("PLAYSTAGE LIVE / CATALINA", juce::dontSendNotification);
         title.setFont(juce::Font(29.0f, juce::Font::bold));
         title.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(title);
 
-        subtitle.setText("VST3 / QUATRO CAMADAS / macOS Catalina", juce::dontSendNotification);
+        subtitle.setText("VST3 + AUDIO UNITS / 4 CAMADAS / 10 PROGRAMAS", juce::dontSendNotification);
         subtitle.setFont(juce::Font(11.0f));
         subtitle.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         addAndMakeVisible(subtitle);
@@ -688,7 +964,7 @@ public:
 
         programName.setText(programs[0].name);
         programName.setFont(juce::Font(15.0f));
-        programName.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff1b111c));
+        programName.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff09233e));
         programName.setColour(juce::TextEditor::textColourId, juce::Colours::white);
         programName.onTextChange = [this]
         {
@@ -703,7 +979,7 @@ public:
         openButton.onClick = [this] { openPresetFile(); };
         addAndMakeVisible(openButton);
 
-        project.setText("BIBLIOTECA MAINSTAGE\n\nPatches do Mac (consulta)",
+        project.setText("BIBLIOTECA DO MAC\n\nMainStage (consulta)",
                         juce::dontSendNotification);
         project.setJustificationType(juce::Justification::topLeft);
         project.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -718,7 +994,7 @@ public:
         addAndMakeVisible(customLibraryButton);
 
         libraryList.setRowHeight(25);
-        libraryList.setColour(juce::ListBox::backgroundColourId, juce::Colour(0xff242b34));
+        libraryList.setColour(juce::ListBox::backgroundColourId, juce::Colour(0xff112743));
         libraryList.setColour(juce::ListBox::outlineColourId, kAccent);
         addAndMakeVisible(libraryList);
 
@@ -767,7 +1043,7 @@ public:
         addAndMakeVisible(pedalButton);
 
         status.setText(engine.getLastError().isEmpty()
-                           ? "Pronto. Abra um instrumento .vst3 em qualquer canal."
+                           ? "Pronto. Selecione um instrumento VST3/AU para Mac. MIDI externo habilitado."
                            : engine.getLastError(), juce::dontSendNotification);
         status.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         addAndMakeVisible(status);
@@ -779,19 +1055,22 @@ public:
                 [this](int slot) { pickVst3(slot); },
                 [this](int slot) { openEditor(slot); },
                 [this](int slot) { clearLayer(slot); },
+                [this](int slot) { openLayerSettings(slot); },
                 [this](int slot, const LayerPreset& state)
                 {
-                    engine.setLayerSettings(slot, state.volume, state.muted, state.solo,
-                                            state.cutoff, state.transpose);
+                    const auto previous = programs[static_cast<size_t>(selectedProgram)]
+                                                  .layers[static_cast<size_t>(slot)];
+                    if (previous.noteLow != state.noteLow || previous.noteHigh != state.noteHigh
+                        || previous.midiChannel != state.midiChannel
+                        || previous.transpose != state.transpose)
+                        engine.panic();
+                    engine.setLayerSettings(slot, state);
                     programs[static_cast<size_t>(selectedProgram)].layers[static_cast<size_t>(slot)] = state;
                 });
             addAndMakeVisible(*strip);
             strips[static_cast<size_t>(i)] = std::move(strip);
         }
 
-        keyboard.setAvailableRange(36, 96);
-        keyboardState.addListener(this);
-        addAndMakeVisible(keyboard);
         setSize(1320, 790);
         scanDefaultLibrary();
         refreshProgramButtons();
@@ -801,7 +1080,6 @@ public:
     ~MainComponent() override
     {
         stopTimer();
-        keyboardState.removeListener(this);
         for (auto& editor : editors)
             editor.reset();
     }
@@ -840,15 +1118,15 @@ public:
     {
         g.fillAll(kBackground);
         const auto header = juce::Rectangle<float>(0, 0, static_cast<float>(getWidth()), 156);
-        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff68213c), 0.0f, 0.0f,
-                                              juce::Colour(0xff20121e),
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff225f98), 0.0f, 0.0f,
+                                              juce::Colour(0xff0c2949),
                                               static_cast<float>(getWidth()), 156.0f, false));
         g.fillRect(header);
-        g.setColour(juce::Colour(0xff3d1f32));
+        g.setColour(juce::Colour(0xff5aa5e3));
         g.fillRect(0, 155, getWidth(), 2);
-        g.setColour(juce::Colour(0xff1d1823));
+        g.setColour(juce::Colour(0xff112b49));
         g.fillRoundedRectangle(sidebarBounds.toFloat(), 8.0f);
-        g.setColour(juce::Colour(0xff281b2c));
+        g.setColour(juce::Colour(0xff19395e));
         g.fillRoundedRectangle(masterBounds.toFloat(), 8.0f);
         g.setColour(kAccent);
         g.setFont(juce::Font(15.0f, juce::Font::bold));
@@ -893,8 +1171,7 @@ public:
 
         auto area = getLocalBounds();
         area.removeFromTop(164);
-        auto bottom = area.removeFromBottom(104);
-        keyboard.setBounds(bottom.removeFromTop(71).reduced(22, 2));
+        auto bottom = area.removeFromBottom(40);
         status.setBounds(bottom.reduced(23, 0));
         area.reduce(12, 5);
         sidebarBounds = area.removeFromLeft(188);
@@ -992,7 +1269,7 @@ private:
                 if (loadedPaths[pos] != layer.file)
                 {
                     juce::String error;
-                    if (engine.loadVst3(i, juce::File(layer.file), error))
+                    if (engine.loadInstrument(i, juce::File(layer.file), error))
                         loadedPaths[pos] = layer.file;
                     else
                     {
@@ -1036,7 +1313,7 @@ private:
             const auto active = (i == selectedProgram);
             programButtons[static_cast<size_t>(i)]->setColour(
                 juce::TextButton::buttonColourId,
-                active ? kAccent : juce::Colour(0xff251b2a));
+                active ? kAccent : juce::Colour(0xff173755));
         }
     }
 
@@ -1073,6 +1350,25 @@ private:
             data->setProperty("mute", layer.muted);
             data->setProperty("solo", layer.solo);
             data->setProperty("transpose", layer.transpose);
+            data->setProperty("noteLow", layer.noteLow);
+            data->setProperty("noteHigh", layer.noteHigh);
+            data->setProperty("midiChannel", layer.midiChannel);
+            data->setProperty("velocityCurve", layer.velocityCurve);
+            data->setProperty("velocityGain", layer.velocityGain);
+            data->setProperty("velocityMin", layer.velocityMin);
+            data->setProperty("velocityMax", layer.velocityMax);
+            data->setProperty("eqLow", layer.eqLow);
+            data->setProperty("eqMid", layer.eqMid);
+            data->setProperty("eqHigh", layer.eqHigh);
+            data->setProperty("attackMs", layer.attackMs);
+            data->setProperty("releaseMs", layer.releaseMs);
+            data->setProperty("envelopeOn", layer.envelopeOn);
+            data->setProperty("driveOn", layer.driveOn);
+            data->setProperty("rotaryOn", layer.rotaryOn);
+            data->setProperty("drive", layer.drive);
+            data->setProperty("driveMix", layer.driveMix);
+            data->setProperty("reverbSend", layer.reverbSend);
+            data->setProperty("rotaryHz", layer.rotaryHz);
             layerArray.add(juce::var(data));
         }
         obj->setProperty("layers", juce::var(layerArray));
@@ -1104,6 +1400,35 @@ private:
                         dst.muted = bool(layer->getProperty("mute"));
                         dst.solo = bool(layer->getProperty("solo"));
                         dst.transpose = int(layer->getProperty("transpose"));
+                        const auto getNumber = [layer](const juce::Identifier& key, double fallback)
+                        {
+                            const auto value = layer->getProperty(key);
+                            return value.isVoid() ? fallback : static_cast<double>(value);
+                        };
+                        const auto getFlag = [layer](const juce::Identifier& key, bool fallback)
+                        {
+                            const auto value = layer->getProperty(key);
+                            return value.isVoid() ? fallback : static_cast<bool>(value);
+                        };
+                        dst.noteLow = static_cast<int>(getNumber("noteLow", dst.noteLow));
+                        dst.noteHigh = static_cast<int>(getNumber("noteHigh", dst.noteHigh));
+                        dst.midiChannel = static_cast<int>(getNumber("midiChannel", dst.midiChannel));
+                        dst.velocityCurve = static_cast<float>(getNumber("velocityCurve", dst.velocityCurve));
+                        dst.velocityGain = static_cast<float>(getNumber("velocityGain", dst.velocityGain));
+                        dst.velocityMin = static_cast<int>(getNumber("velocityMin", dst.velocityMin));
+                        dst.velocityMax = static_cast<int>(getNumber("velocityMax", dst.velocityMax));
+                        dst.eqLow = static_cast<float>(getNumber("eqLow", dst.eqLow));
+                        dst.eqMid = static_cast<float>(getNumber("eqMid", dst.eqMid));
+                        dst.eqHigh = static_cast<float>(getNumber("eqHigh", dst.eqHigh));
+                        dst.attackMs = static_cast<float>(getNumber("attackMs", dst.attackMs));
+                        dst.releaseMs = static_cast<float>(getNumber("releaseMs", dst.releaseMs));
+                        dst.envelopeOn = getFlag("envelopeOn", dst.envelopeOn);
+                        dst.driveOn = getFlag("driveOn", dst.driveOn);
+                        dst.rotaryOn = getFlag("rotaryOn", dst.rotaryOn);
+                        dst.drive = static_cast<float>(getNumber("drive", dst.drive));
+                        dst.driveMix = static_cast<float>(getNumber("driveMix", dst.driveMix));
+                        dst.reverbSend = static_cast<float>(getNumber("reverbSend", dst.reverbSend));
+                        dst.rotaryHz = static_cast<float>(getNumber("rotaryHz", dst.rotaryHz));
                     }
                 }
         }
@@ -1114,7 +1439,7 @@ private:
     {
         captureActiveProgram();
         auto* obj = new juce::DynamicObject();
-        obj->setProperty("format", "PlayStage-2.0");
+        obj->setProperty("format", "PlayStage-3.0");
         obj->setProperty("selected", selectedProgram);
         juce::Array<juce::var> list;
         for (const auto& preset : programs)
@@ -1156,7 +1481,8 @@ private:
                 return;
             const auto content = juce::JSON::parse(file.loadFileAsString());
             auto* obj = content.getDynamicObject();
-            if (obj == nullptr || obj->getProperty("format").toString() != "PlayStage-2.0")
+            const auto version = obj != nullptr ? obj->getProperty("format").toString() : juce::String();
+            if (version != "PlayStage-2.0" && version != "PlayStage-3.0")
             {
                 status.setText("Arquivo .psstage invalido ou de outra versao.", juce::dontSendNotification);
                 return;
@@ -1260,23 +1586,13 @@ private:
         });
     }
 
-    void handleNoteOn(juce::MidiKeyboardState*, int channel, int note, float velocity) override
-    {
-        engine.queueMidi(juce::MidiMessage::noteOn(channel, note, velocity));
-    }
-
-    void handleNoteOff(juce::MidiKeyboardState*, int channel, int note, float velocity) override
-    {
-        engine.queueMidi(juce::MidiMessage::noteOff(channel, note, velocity));
-    }
-
     void pickVst3(int index)
     {
         chooser = std::make_unique<juce::FileChooser>(
-            "Selecione um plugin VST3 para macOS",
+            "Selecione um plugin VST3 ou Audio Unit para macOS",
             juce::File::getSpecialLocation(juce::File::userHomeDirectory)
-                .getChildFile("Library/Audio/Plug-Ins/VST3"),
-            "*.vst3");
+                .getChildFile("Library/Audio/Plug-Ins"),
+            "*.vst3;*.component");
 
         const auto flags = juce::FileBrowserComponent::openMode
                          | juce::FileBrowserComponent::canSelectFiles
@@ -1289,11 +1605,11 @@ private:
 
             editors[static_cast<size_t>(index)].reset();
             juce::String error;
-            if (!engine.loadVst3(index, file, error))
+            if (!engine.loadInstrument(index, file, error))
             {
-                status.setText("Falha ao abrir: " + error, juce::dontSendNotification);
+                status.setText("Falha ao abrir VST3/AU: " + error, juce::dontSendNotification);
                 juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                        "Plugin VST3", error);
+                                                        "Instrumento VST3 / AU", error);
                 return;
             }
 
@@ -1318,6 +1634,28 @@ private:
             window = std::make_unique<PluginEditorWindow>(*plugin);
         window->setVisible(true);
         window->toFront(true);
+    }
+
+    void openLayerSettings(int index)
+    {
+        if (!juce::isPositiveAndBelow(index, kSlots))
+            return;
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        const int programAtOpen = selectedProgram;
+        auto changed = [safeThis, index, programAtOpen](const LayerPreset& layer)
+        {
+            if (safeThis != nullptr && safeThis->selectedProgram == programAtOpen)
+                safeThis->strips[static_cast<size_t>(index)]->applyState(layer);
+        };
+        juce::DialogWindow::LaunchOptions options;
+        options.dialogTitle = "Ajustes avancados / Camada " + juce::String(index + 1);
+        options.dialogBackgroundColour = kBackground;
+        options.content.setOwned(new LayerSettingsComponent(
+            index, strips[static_cast<size_t>(index)]->getState(), std::move(changed)));
+        options.useNativeTitleBar = true;
+        options.escapeKeyTriggersCloseButton = true;
+        options.resizable = false;
+        options.launchAsync();
     }
 
     void showDeviceSettings()
@@ -1347,8 +1685,6 @@ private:
     int selectedProgram = 0;
     juce::Array<juce::File> libraryFiles;
     juce::ListBox libraryList;
-    juce::MidiKeyboardState keyboardState;
-    juce::MidiKeyboardComponent keyboard;
     std::array<std::unique_ptr<ChannelStrip>, kSlots> strips;
     std::array<std::unique_ptr<PluginEditorWindow>, kSlots> editors;
     std::unique_ptr<juce::FileChooser> chooser;
@@ -1377,11 +1713,15 @@ class PlayStageApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "PlayStage VST3 Catalina"; }
-    const juce::String getApplicationVersion() override { return "0.2.0"; }
+    const juce::String getApplicationVersion() override { return "0.3.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override
     {
         lookAndFeel.setColour(juce::TextButton::buttonColourId, kPanel.brighter(0.1f));
+        lookAndFeel.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        lookAndFeel.setColour(juce::TextButton::buttonOnColourId, kAccent);
+        lookAndFeel.setColour(juce::Slider::textBoxTextColourId, juce::Colours::white);
+        lookAndFeel.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colour(0xff112b49));
         lookAndFeel.setColour(juce::Slider::thumbColourId, kAccent);
         juce::LookAndFeel::setDefaultLookAndFeel(&lookAndFeel);
         window = std::make_unique<MainWindow>();

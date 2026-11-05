@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "macOS deployment target")
 set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Target CPU architecture")
 
-project(PlayStageCatalinaHost VERSION 0.2.0 LANGUAGES C CXX)
+project(PlayStageCatalinaHost VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,7 +31,7 @@ target_compile_definitions(PlayStageCatalinaHost PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_PLUGINHOST_VST3=1
-    JUCE_PLUGINHOST_AU=0
+    JUCE_PLUGINHOST_AU=1
     JUCE_DISPLAY_SPLASH_SCREEN=0)
 
 target_link_libraries(PlayStageCatalinaHost PRIVATE

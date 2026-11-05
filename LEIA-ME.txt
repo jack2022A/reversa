@@ -1,4 +1,4 @@
-PLAYSTAGE VST3 CATALINA - VERSAO 0.2 (PRE-ALFA)
+PLAYSTAGE LIVE CATALINA - VERSAO 0.3 (PRE-ALFA)
 =================================================
 
 ATENCAO: ESTE PACOTE E CODIGO-FONTE; NAO CONTEM UM .APP COMPILADO.
@@ -7,15 +7,18 @@ O AUTOR NAO VALIDOU O FUNCIONAMENTO NO MACOS 10.15 NEM COM PLUGINS REAIS.
 O que este codigo implementa:
 - Aplicativo desktop JUCE/C++ nativo, sem Safari, Chrome ou HTML.
 - Saida de audio usando CoreAudio por meio do JUCE.
-- Quatro canais de instrumento VST3, em paralelo (layers).
-- Recepcao de teclados MIDI e teclado musical clicavel na tela.
+- Quatro camadas de instrumentos VST3 e Audio Unit (.component) para macOS.
+- Recepcao de teclados MIDI externos (teclado virtual removido).
 - Volume e mute independentes por canal.
-- Interface de palco com quatro camadas coloridas e 10 programas selecionaveis.
+- Interface de palco em tons de azul e branco e 10 programas selecionaveis.
 - Salvar e abrir banco de 10 programas em arquivo .psstage (JSON), incluindo
   caminhos e estados dos VST3 instalados no Mac.
 - Solo, filtro passa-baixas, transposicao MIDI (-12/+12) e medidores por camada.
+- Painel AJUSTES DA CAMADA: nota inicial/final, canal MIDI, curva/limites/ganho
+  de velocidade, EQ de graves/medios/agudos, envelope (attack/release), drive,
+  rotary/tremolo e envio de reverb. Implementacao propria, nao algoritmos Apple.
 - Master com volume, reverb estereo, medidores, sustain CC64 e PANIC MIDI.
-- Janela com editor nativo do plugin VST3 quando disponivel.
+- Janela com editor nativo do plugin VST3/AU quando disponivel.
 - Seletor do dispositivo de saida de audio e MIDI.
 - Painel "Biblioteca MainStage" que consulta pastas padrao de presets
   do MainStage 3/Logic e permite acrescentar uma pasta personalizada.
@@ -25,6 +28,10 @@ O que este codigo implementa:
 O que AINDA NAO implementa:
 - Carregamento integral e fiel de arquivos .concert do MainStage.
 - Instrumentos exclusivos Logic/MainStage da Apple (EXS, Sampler, Alchemy etc).
+- Os instrumentos Apple integrados ao MainStage geralmente NAO aparecem como
+  plugins .component e NAO podem ser reutilizados automaticamente por este app.
+- Apenas Audio Units expostos como componentes no macOS podem ser selecionados,
+  e dependem da compatibilidade e licenca do plugin instalado.
 - Abrir plugins VST3 para Windows (um binario Windows nao funciona no macOS).
 - Efeitos auxiliares completos e roteamento de audio externo e controle de pan.
 - Conversao automatica de arquivos .patch/.concert da Apple para .psstage.
@@ -35,7 +42,7 @@ Requisitos de compilacao:
 - macOS Intel e Xcode (Xcode 12.4 ou mais novo).
 - macOS 10.15.4+ se a compilacao for feita diretamente no Catalina.
 - CMake 3.22+ e conexao a internet para buscar JUCE 8.0.16-security.
-- O plugin .vst3 instalado deve ser uma versao para macOS Intel compatível
+- O plugin .vst3/.component instalado deve ser uma versao para macOS Intel compativel
   com a versao de macOS do usuario.
 
 Para compilar no Mac:
@@ -50,13 +57,15 @@ Alternativa de compilacao online (nao requer instalar Xcode no Mac):
 OBS: essas etapas dependem de uma conta, repositorio e acesso a runners macOS.
 
 Como usar depois de instalado:
-- Tenha um instrumento macOS .vst3 (nao o formato Windows) instalado, por ex.
-  em ~/Library/Audio/Plug-Ins/VST3 ou /Library/Audio/Plug-Ins/VST3.
+- Tenha um instrumento macOS .vst3 ou .component (Audio Unit) instalado,
+  em ~/Library/Audio/Plug-Ins ou /Library/Audio/Plug-Ins.
 - Inicie o PlayStage VST3 Catalina.
 - Clique "Audio / MIDI" e selecione a saida CoreAudio.
-- Em qualquer camada, clique "+ Adicionar VST3", selecione o plugin .vst3.
-- Clique "Editor" para abrir o painel original do instrumento.
-- Toque no teclado MIDI ou teclado da tela. Os 4 canais soam juntos.
+- Em qualquer camada, clique "+ Escolher VST3 / AU", selecione o plugin.
+- Clique "Editor do plugin" para abrir seu painel original, se disponivel.
+- Clique "AJUSTES DA CAMADA" para editar a faixa MIDI, curva de velocidade,
+  equalizacao, envelope e efeitos.
+- Toque no teclado MIDI externo. Os quatro canais podem soar juntos.
 - Use os botoes 1 a 10 para montar e alternar programas. Use "Salvar preset"
   para exportar o banco .psstage; "Abrir preset" para restaurar no Mac.
 - O arquivo .psstage nao inclui os plugins em si: eles precisam permanecer
