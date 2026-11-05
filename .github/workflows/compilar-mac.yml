@@ -1,0 +1,37 @@
+name: Compilar app macOS Intel
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  app-macos:
+    runs-on: macos-15-intel
+    permissions:
+      contents: read
+    steps:
+      - name: Baixar fontes
+        uses: actions/checkout@v4
+
+      - name: Preparar CMake
+        run: cmake -S . -B .build -G Xcode -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 -DCMAKE_OSX_ARCHITECTURES=x86_64
+
+      - name: Compilar aplicativo nativo
+        run: cmake --build .build --config Release --parallel 2
+
+      - name: Compactar app
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find .build -type d -name 'PlayStage VST3 Catalina.app' -path '*/Release/*' -print -quit)"
+          test -n "$app_path"
+          codesign --force --deep --sign - "$app_path"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" PlayStage_VST3_Catalina_Intel.zip
+
+      - name: Baixar app pronto em Actions / Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlayStage-VST3-Catalina-Intel
+          path: PlayStage_VST3_Catalina_Intel.zip
+          if-no-files-found: error

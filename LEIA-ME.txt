@@ -1,0 +1,81 @@
+PLAYSTAGE VST3 CATALINA - PROJETO NATIVO (PRE-ALFA)
+=================================================
+
+ATENCAO: ESTE PACOTE E CODIGO-FONTE; NAO CONTEM UM .APP COMPILADO.
+O AUTOR NAO VALIDOU O FUNCIONAMENTO NO MACOS 10.15 NEM COM PLUGINS REAIS.
+
+O que este codigo implementa:
+- Aplicativo desktop JUCE/C++ nativo, sem Safari, Chrome ou HTML.
+- Saida de audio usando CoreAudio por meio do JUCE.
+- Quatro canais de instrumento VST3, em paralelo (layers).
+- Recepcao de teclados MIDI e teclado musical clicavel na tela.
+- Volume e mute independentes por canal.
+- Janela com editor nativo do plugin VST3 quando disponivel.
+- Seletor do dispositivo de saida de audio e MIDI.
+- Painel "Biblioteca MainStage" que consulta pastas padrao de presets
+  do MainStage 3/Logic e permite acrescentar uma pasta personalizada.
+- Selecao de item da biblioteca mostra o caminho; duplo clique abre no Finder.
+  Os arquivos originais nao sao copiados, movidos nem alterados.
+
+O que AINDA NAO implementa:
+- Carregamento integral e fiel de arquivos .concert do MainStage.
+- Instrumentos exclusivos Logic/MainStage da Apple (EXS, Sampler, Alchemy etc).
+- Abrir plugins VST3 para Windows (um binario Windows nao funciona no macOS).
+- Presets e efeitos auxiliares completos, roteamento de audio externo,
+  controle de pan e salvamento dos patches.
+- Recuperacao de plugins que travem dentro do mesmo processo.
+- Reproducao direta dos presets listados na Biblioteca MainStage.
+
+Requisitos de compilacao:
+- macOS Intel e Xcode (Xcode 12.4 ou mais novo).
+- macOS 10.15.4+ se a compilacao for feita diretamente no Catalina.
+- CMake 3.22+ e conexao a internet para buscar JUCE 7.0.12.
+- O plugin .vst3 instalado deve ser uma versao para macOS Intel compatível
+  com a versao de macOS do usuario.
+
+Para compilar no Mac:
+    bash COMPILAR_CATALINA.command
+O resultado fica em Saida/PlayStage_VST3_Catalina_Intel.zip
+
+Alternativa de compilacao online (nao requer instalar Xcode no Mac):
+1. Publique o conteudo desta pasta em um repositorio GitHub de sua conta.
+2. Um push para a branch main dispara o workflow automaticamente.
+   Tambem pode abrir Actions > Compilar app macOS Intel > Run workflow.
+3. Quando terminar, baixe o ZIP em Artifacts da execucao.
+OBS: essas etapas dependem de uma conta, repositorio e acesso a runners macOS.
+
+Como usar depois de instalado:
+- Tenha um instrumento macOS .vst3 (nao o formato Windows) instalado, por ex.
+  em ~/Library/Audio/Plug-Ins/VST3 ou /Library/Audio/Plug-Ins/VST3.
+- Inicie o PlayStage VST3 Catalina.
+- Clique "Audio / MIDI" e selecione a saida CoreAudio.
+- Em qualquer canal, clique "Abrir VST3", selecione o plugin .vst3.
+- Clique "Editor" para abrir o painel original do instrumento.
+- Toque no teclado MIDI ou teclado da tela. Os 4 canais soam juntos.
+- Clique "Buscar biblioteca" para catalogar patches e instrumentos nas
+  pastas padrao do MainStage/Logic no proprio Mac. Essa catalogacao
+  NAO transforma presets Apple em VST3.
+
+Pastas padrao consultadas no Catalina (se existirem):
+  ~/Library/Application Support/Logic/MainStage Patches
+  ~/Music/Audio Music Apps/Patches
+  ~/Music/Audio Music Apps/Channel Strip Settings
+  ~/Music/Audio Music Apps/Concerts
+  /Library/Application Support/Logic/Sampler Instruments
+  /Library/Application Support/Logic/Plug-In Settings
+  /Library/Application Support/Logic/Channel Strip Settings
+  /Library/Application Support/Logic/MainStage Patches
+Observacao: conteudo relocavel para disco externo exige "Outra pasta...".
+
+IMPORTANTE: para distribuir aplicativos gerados com JUCE, verifique a
+licenca JUCE/GPL ou uma licenca comercial apropriada.
+
+Falhas potenciais:
+- Alguns plugins VST3 para macOS podem exigir uma versao mais recente
+  do sistema ou validacao/instalacao pelo fabricante.
+- Plugins de terceiros podem falhar ou derrubar o processo. Use copias
+  dos projetos e teste os instrumentos antes de usar ao vivo.
+- Um ZIP compilado sem assinatura Developer ID/notarizacao pode exibir
+  avisos do Gatekeeper. Nao desative protecoes globais do macOS.
+- A compilacao de macOS com deployment target 10.15 nao comprova que
+  todo plugin e todo conjunto de bibliotecas serao compativeis com Catalina.
