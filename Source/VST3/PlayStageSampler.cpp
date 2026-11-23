@@ -5,7 +5,7 @@
 #include <cmath>
 
 namespace {
-constexpr int numLayers = 4;
+constexpr int numLayers = 5;
 constexpr int maxZones = 256;
 const auto navy = juce::Colour(0xff0d2541);
 const auto panel = juce::Colour(0xff183b63);
@@ -55,7 +55,8 @@ struct Bank {
 struct LayerParams {
     std::atomic<float> volume { 0.8f };
     std::atomic<int> noteLow { 0 }, noteHigh { 127 }, midiChannel { 0 }, transpose { 0 };
-    std::atomic<bool> muted { false }, solo { false };
+    std::atomic<bool> muted { false }, solo { false }, midiEnabled { true }, flushNotes { false };
+    std::atomic<float> tone { 1.0f };
 };
 }
 
@@ -88,6 +89,7 @@ public:
         rate.store(sr);
         scratch.setSize(2, juce::jmax(2048, block), false, false, true);
         for (auto& midi : midiBuffers) midi.ensureSize(8192);
+        for (auto& states : toneStates) states = { 0.0f, 0.0f };
         for (auto& p : banks) {
             auto bank = std::atomic_load(&p);
             if (bank) bank->synth.setCurrentPlaybackSampleRate(sr);
@@ -110,13 +112,14 @@ public:
         for (const auto& l : layers) anySolo |= l.solo.load();
         for (int layer = 0; layer < numLayers; ++layer) {
             const auto& p = layers[(size_t) layer];
-            if (p.muted.load() || (anySolo && !p.solo.load())) continue;
             auto bank = std::atomic_load(&banks[(size_t) layer]);
             if (!bank) continue;
+            if (p.flushNotes.exchange(false))
+                bank->synth.allNotesOff(0, false);
 
             auto& events = midiBuffers[(size_t) layer];
             events.clear();
-            for (const auto metadata : midi) {
+            if (p.midiEnabled.load()) for (const auto metadata : midi) {
                 auto m = metadata.getMessage();
                 if (p.midiChannel.load() != 0 && m.getChannel() > 0
                     && m.getChannel() != p.midiChannel.load()) continue;
@@ -129,7 +132,18 @@ public:
             }
             scratch.clear();
             bank->synth.renderNextBlock(scratch, events, 0, n);
-            const auto gain = p.volume.load();
+            const float tone = juce::jlimit(0.0f, 1.0f, p.tone.load());
+            const float cutoffHz = 250.0f * std::pow(72.0f, tone);
+            const float alpha = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * cutoffHz / float(rate.load()));
+            for (int ch = 0; ch < 2; ++ch) {
+                auto& state = toneStates[(size_t) layer][(size_t) ch];
+                auto* data = scratch.getWritePointer(ch);
+                for (int sample = 0; sample < n; ++sample) {
+                    state += alpha * (data[sample] - state);
+                    data[sample] = state;
+                }
+            }
+            const auto gain = (p.muted.load() || (anySolo && !p.solo.load())) ? 0.0f : p.volume.load();
             output.addFrom(0, 0, scratch, 0, 0, n, gain);
             output.addFrom(1, 0, scratch, 1, 0, n, gain);
         }
@@ -188,6 +202,15 @@ public:
     bool getSolo(int i) const { return layers[(size_t)i].solo.load(); }
     void setTranspose(int i,int v) { if(juce::isPositiveAndBelow(i,numLayers)) layers[(size_t)i].transpose.store(juce::jlimit(-24,24,v)); }
     int getTranspose(int i) const { return layers[(size_t)i].transpose.load(); }
+    void setMidiEnabled(int i,bool v) {
+        if (!juce::isPositiveAndBelow(i,numLayers)) return;
+        layers[(size_t)i].midiEnabled.store(v);
+        if (!v) layers[(size_t)i].flushNotes.store(true);
+    }
+    bool getMidiEnabled(int i) const { return layers[(size_t)i].midiEnabled.load(); }
+    void setTone(int i,float v) { if(juce::isPositiveAndBelow(i,numLayers)) layers[(size_t)i].tone.store(juce::jlimit(0.0f,1.0f,v)); }
+    float getTone(int i) const { return layers[(size_t)i].tone.load(); }
+    void panic() { for (auto& l: layers) l.flushNotes.store(true); }
     void setMaster(float v) { masterVolume.store(juce::jlimit(0.f,1.5f,v)); }
     float getMaster() const { return masterVolume.load(); }
     void setReverb(float v) { reverbAmount.store(juce::jlimit(0.f,0.6f,v)); }
@@ -207,6 +230,8 @@ public:
             layer->setAttribute("mute",getMute(i));
             layer->setAttribute("solo",getSolo(i));
             layer->setAttribute("transpose",getTranspose(i));
+            layer->setAttribute("midiEnabled",getMidiEnabled(i));
+            layer->setAttribute("tone",double(getTone(i)));
             layer->setAttribute("low",layers[(size_t)i].noteLow.load());
             layer->setAttribute("high",layers[(size_t)i].noteHigh.load());
             layer->setAttribute("channel",layers[(size_t)i].midiChannel.load());
@@ -230,6 +255,8 @@ public:
                 p.muted.store(child->getBoolAttribute("mute",false));
                 p.solo.store(child->getBoolAttribute("solo",false));
                 p.transpose.store(child->getIntAttribute("transpose",0));
+                p.midiEnabled.store(child->getBoolAttribute("midiEnabled",true));
+                p.tone.store(float(child->getDoubleAttribute("tone",1.0)));
                 p.noteLow.store(child->getIntAttribute("low",0));
                 p.noteHigh.store(child->getIntAttribute("high",127));
                 p.midiChannel.store(child->getIntAttribute("channel",0));
@@ -321,6 +348,7 @@ private:
     std::array<juce::File,numLayers> layerFiles;
     std::array<juce::String,numLayers> layerNames;
     std::array<juce::MidiBuffer,numLayers> midiBuffers;
+    std::array<std::array<float,2>,numLayers> toneStates {};
     juce::AudioBuffer<float> scratch;
     juce::Reverb reverb;
     float lastReverb=-1.0f;
@@ -332,12 +360,12 @@ class StageEditor final : public juce::AudioProcessorEditor, private juce::Timer
 public:
     explicit StageEditor(PlayStageSampler& processor)
       : juce::AudioProcessorEditor(&processor), engine(processor) {
-        setSize(970,625);
+        setSize(1050,700);
         header.setText("PLAYSTAGE  |  SAMPLER VST3",juce::dontSendNotification);
         header.setColour(juce::Label::textColourId,juce::Colours::white);
         header.setFont(juce::Font(23.0f,juce::Font::bold));
         addAndMakeVisible(header);
-        subtitle.setText("4 CAMADAS  /  MAPAS ABLETON .PSMAP  /  MIDI / MAC + WINDOWS",
+        subtitle.setText("5 CAMADAS / STAGEBRIDGE + PLAYSTAGE / MAPAS .PSMAP / MIDI",
                          juce::dontSendNotification);
         subtitle.setColour(juce::Label::textColourId,pale);
         addAndMakeVisible(subtitle);
@@ -357,6 +385,14 @@ public:
             soloButtons[(size_t)i].setToggleState(engine.getSolo(i),juce::dontSendNotification);
             soloButtons[(size_t)i].onClick=[this,i]{ engine.setSolo(i,soloButtons[(size_t)i].getToggleState()); };
             addAndMakeVisible(soloButtons[(size_t)i]);
+            midiButtons[(size_t)i].setButtonText("MIDI");
+            midiButtons[(size_t)i].setClickingTogglesState(true);
+            midiButtons[(size_t)i].setToggleState(engine.getMidiEnabled(i),juce::dontSendNotification);
+            midiButtons[(size_t)i].onClick=[this,i]{ engine.setMidiEnabled(i,midiButtons[(size_t)i].getToggleState()); };
+            addAndMakeVisible(midiButtons[(size_t)i]);
+            initSlider(tones[(size_t)i],0.0,1.0,engine.getTone(i));
+            tones[(size_t)i].onValueChange=[this,i]{ engine.setTone(i,float(tones[(size_t)i].getValue())); };
+            addAndMakeVisible(tones[(size_t)i]);
             initSlider(gains[(size_t)i],0.0,1.5,engine.getVolume(i));
             gains[(size_t)i].onValueChange=[this,i] {engine.setVolume(i,float(gains[(size_t)i].getValue()));};
             initSlider(transposes[(size_t)i],-24,24,engine.getTranspose(i));
@@ -374,6 +410,9 @@ public:
         masterLabel.setText("MASTER",juce::dontSendNotification);
         reverbLabel.setText("REVERB",juce::dontSendNotification);
         meter.setText("SAIDA: 0.00",juce::dontSendNotification);
+        panicButton.setButtonText("PANICO / ALL NOTES OFF");
+        panicButton.onClick=[this]{ engine.panic(); };
+        addAndMakeVisible(panicButton);
         for (auto* l:{&masterLabel,&reverbLabel,&meter}) {
             l->setColour(juce::Label::textColourId,juce::Colours::white);
             addAndMakeVisible(*l);
@@ -389,40 +428,44 @@ public:
         g.setColour(cyan);
         g.fillRect(0,0,getWidth(),5);
         for (int i=0;i<numLayers;++i) {
-            const int y=111+i*99;
+            const int y=105+i*95;
             g.setColour(i%2?juce::Colour(0xff21486e):panel);
-            g.fillRoundedRectangle(16.0f,float(y),float(getWidth()-32),90.0f,10.0f);
+            g.fillRoundedRectangle(16.0f,float(y),float(getWidth()-32),85.0f,10.0f);
             g.setColour(cyan.withAlpha(0.6f));
-            g.fillRoundedRectangle(16.0f,float(y),5.0f,90.0f,2.0f);
+            g.fillRoundedRectangle(16.0f,float(y),5.0f,85.0f,2.0f);
         }
         g.setColour(panel);
-        g.fillRoundedRectangle(16.0f,520.0f,float(getWidth()-32),88.0f,10.0f);
+        g.fillRoundedRectangle(16.0f,591.0f,float(getWidth()-32),93.0f,10.0f);
         g.setColour(pale);
         g.setFont(12.0f);
         for (int i=0;i<numLayers;++i) {
-            const int y=111+i*99;
-            g.drawText("VOL",490,y+16,65,20,juce::Justification::centredLeft);
-            g.drawText("TRANSPOSE",700,y+16,110,20,juce::Justification::centredLeft);
+            const int y=105+i*95;
+            g.drawText("TONE",562,y+10,65,20,juce::Justification::centredLeft);
+            g.drawText("VOL",712,y+10,65,20,juce::Justification::centredLeft);
+            g.drawText("TRANSPOSE",864,y+10,110,20,juce::Justification::centredLeft);
         }
     }
     void resized() override {
         header.setBounds(20,18,660,34);
         subtitle.setBounds(21,56,810,24);
         for (int i=0;i<numLayers;++i) {
-            const int y=111+i*99;
-            labels[(size_t)i].setBounds(31,y+16,290,50);
-            loadButtons[(size_t)i].setBounds(327,y+26,105,36);
-            muteButtons[(size_t)i].setBounds(441,y+26,38,36);
-            gains[(size_t)i].setBounds(495,y+37,182,35);
-            transposes[(size_t)i].setBounds(702,y+37,132,35);
-            soloButtons[(size_t)i].setBounds(866,y+26,50,36);
+            const int y=105+i*95;
+            labels[(size_t)i].setBounds(29,y+18,245,42);
+            loadButtons[(size_t)i].setBounds(283,y+25,92,34);
+            midiButtons[(size_t)i].setBounds(382,y+25,68,34);
+            muteButtons[(size_t)i].setBounds(459,y+25,39,34);
+            soloButtons[(size_t)i].setBounds(505,y+25,39,34);
+            tones[(size_t)i].setBounds(559,y+29,132,41);
+            gains[(size_t)i].setBounds(710,y+29,133,41);
+            transposes[(size_t)i].setBounds(863,y+29,152,41);
         }
-        masterLabel.setBounds(31,536,85,24);
-        master.setBounds(115,538,225,32);
-        reverbLabel.setBounds(350,536,75,24);
-        reverb.setBounds(426,538,186,32);
-        meter.setBounds(638,534,260,28);
-        message.setBounds(28,574,875,22);
+        masterLabel.setBounds(28,606,85,24);
+        master.setBounds(112,607,190,32);
+        reverbLabel.setBounds(312,606,75,24);
+        reverb.setBounds(386,607,166,32);
+        panicButton.setBounds(566,603,200,36);
+        meter.setBounds(782,606,230,28);
+        message.setBounds(27,651,950,22);
     }
 private:
     void initSlider(juce::Slider& s,double min,double max,double value) {
@@ -463,8 +506,9 @@ private:
     PlayStageSampler& engine;
     juce::Label header,subtitle,message,masterLabel,reverbLabel,meter;
     std::array<juce::Label,numLayers> labels;
-    std::array<juce::TextButton,numLayers> loadButtons,muteButtons,soloButtons;
-    std::array<juce::Slider,numLayers> gains,transposes;
+    std::array<juce::TextButton,numLayers> loadButtons,muteButtons,soloButtons,midiButtons;
+    juce::TextButton panicButton;
+    std::array<juce::Slider,numLayers> gains,transposes,tones;
     juce::Slider master,reverb;
     std::unique_ptr<juce::FileChooser> chooser;
 };
