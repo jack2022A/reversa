@@ -1,0 +1,63 @@
+name: Compilar fonte unificada macOS e Windows
+on:
+  push:
+    branches: ["unificado/playstage-stagebridge"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar
+        shell: pwsh
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      - name: Compilar
+        shell: pwsh
+        run: cmake --build build --config Release --target StageBridgeUnified_VST3 StageBridgeUnified_Standalone --parallel 2
+      - name: Pacote Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $vst=Get-ChildItem build -Recurse -Directory -Filter "StageBridge PlayStage.vst3" | Select-Object -First 1
+          $exe=Get-ChildItem build -Recurse -File -Filter "StageBridge PlayStage.exe" | Select-Object -First 1
+          if (!$vst -or !$exe) { throw "Plugin ou aplicativo nao encontrado" }
+          New-Item -ItemType Directory pkg -Force | Out-Null
+          Copy-Item $vst.FullName pkg -Recurse
+          Copy-Item $exe.FullName pkg
+          Compress-Archive -Path "pkg\*" -DestinationPath StageBridge_PlayStage_Windows_x64.zip -Force
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: StageBridge-PlayStage-Windows-x64
+          path: StageBridge_PlayStage_Windows_x64.zip
+          if-no-files-found: error
+
+  mac:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar
+        run: cmake -S . -B build -G Xcode -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 -DCMAKE_OSX_ARCHITECTURES=x86_64
+      - name: Compilar
+        run: cmake --build build --config Release --target StageBridgeUnified_VST3 StageBridgeUnified_Standalone StageBridgeUnified_AU --parallel 2
+      - name: Pacote macOS Intel
+        shell: bash
+        run: |
+          set -euo pipefail
+          vst="$(find build -type d -name 'StageBridge PlayStage.vst3' -print -quit)"
+          au="$(find build -type d -name 'StageBridge PlayStage.component' -print -quit)"
+          app="$(find build -type d -name 'StageBridge PlayStage.app' -path '*/Release/*' -print -quit)"
+          test -n "$vst" && test -n "$au" && test -n "$app"
+          mkdir -p pkg
+          cp -R "$vst" "$au" "$app" pkg/
+          codesign --force --deep --sign - "pkg/StageBridge PlayStage.vst3"
+          codesign --force --deep --sign - "pkg/StageBridge PlayStage.component"
+          codesign --force --deep --sign - "pkg/StageBridge PlayStage.app"
+          ditto -c -k --sequesterRsrc pkg StageBridge_PlayStage_macOS_Catalina_Intel.zip
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: StageBridge-PlayStage-Catalina-Intel
+          path: StageBridge_PlayStage_macOS_Catalina_Intel.zip
+          if-no-files-found: error

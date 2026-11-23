@@ -60,14 +60,14 @@ struct LayerParams {
 };
 }
 
-class PlayStageSampler final : public juce::AudioProcessor, private juce::AsyncUpdater {
+class StageBridgeUnified final : public juce::AudioProcessor, private juce::AsyncUpdater {
 public:
-    PlayStageSampler()
+    StageBridgeUnified()
         : juce::AudioProcessor(BusesProperties()
               .withOutput("Stereo Out", juce::AudioChannelSet::stereo(), true)) {
         formats.registerBasicFormats();
     }
-    ~PlayStageSampler() override { cancelPendingUpdate(); }
+    ~StageBridgeUnified() override { cancelPendingUpdate(); }
 
     const juce::String getName() const override { return "PlayStage Sampler"; }
     bool acceptsMidi() const override { return true; }
@@ -87,7 +87,7 @@ public:
 
     void prepareToPlay(double sr, int block) override {
         rate.store(sr);
-        scratch.setSize(2, juce::jmax(2048, block), false, false, true);
+        scratch.setSize(2, juce::jmax(65536, block), false, false, true);
         for (auto& midi : midiBuffers) midi.ensureSize(8192);
         for (auto& states : toneStates) states = { 0.0f, 0.0f };
         for (auto& p : banks) {
@@ -98,7 +98,7 @@ public:
         reverb.reset();
         lastReverb = -1.0f;
     }
-    void releaseResources() override { reverb.reset(); }
+    void releaseResources() override { reverb.reset(); padEnvelope = 0.0f; }
 
     void processBlock(juce::AudioBuffer<float>& output, juce::MidiBuffer& midi) override {
         juce::ScopedNoDenormals noDenormals;
@@ -106,7 +106,7 @@ public:
         output.clear();
         if (n <= 0 || output.getNumChannels() < 2) return;
         if (scratch.getNumSamples() < n)
-            scratch.setSize(2, n, false, false, true); // host changed block size
+            return; // No audio-thread allocation; pathological host buffer rejected.
 
         bool anySolo = false;
         for (const auto& l : layers) anySolo |= l.solo.load();
@@ -146,6 +146,26 @@ public:
             const auto gain = (p.muted.load() || (anySolo && !p.solo.load())) ? 0.0f : p.volume.load();
             output.addFrom(0, 0, scratch, 0, 0, n, gain);
             output.addFrom(1, 0, scratch, 1, 0, n, gain);
+        }
+        if (padStop.exchange(false)) padEnvelope = 0.0f;
+        const bool padActive = padEnabled.load();
+        const float padLevel = padVolume.load();
+        const float padColour = padTone.load();
+        const double sr = juce::jmax(1.0, rate.load());
+        const double freq = 440.0 * std::pow(2.0, (padRoot.load() - 69.0) / 12.0);
+        const double phaseStep = juce::MathConstants<double>::twoPi * freq / sr;
+        for (int i = 0; i < n; ++i) {
+            padEnvelope = juce::jlimit(0.0f, 1.0f, padEnvelope + (padActive ? 1.0f : -1.0f) / float(sr * 0.65));
+            if (padEnvelope <= 0.0f) continue;
+            const float fundamental = float(std::sin(padPhase));
+            const float fifth = float(std::sin(padFifthPhase));
+            const float v = (fundamental * 0.17f + fifth * (0.035f + padColour * 0.075f)
+                           + float(std::sin(padPhase * 2.0)) * padColour * 0.025f)
+                          * padEnvelope * padLevel;
+            output.addSample(0, i, v);
+            output.addSample(1, i, v);
+            padPhase = std::fmod(padPhase + phaseStep, juce::MathConstants<double>::twoPi);
+            padFifthPhase = std::fmod(padFifthPhase + phaseStep * 1.498307, juce::MathConstants<double>::twoPi);
         }
         const auto wet = reverbAmount.load();
         if (wet != lastReverb) {
@@ -210,7 +230,15 @@ public:
     bool getMidiEnabled(int i) const { return layers[(size_t)i].midiEnabled.load(); }
     void setTone(int i,float v) { if(juce::isPositiveAndBelow(i,numLayers)) layers[(size_t)i].tone.store(juce::jlimit(0.0f,1.0f,v)); }
     float getTone(int i) const { return layers[(size_t)i].tone.load(); }
-    void panic() { for (auto& l: layers) l.flushNotes.store(true); }
+    void panic() { for (auto& l: layers) l.flushNotes.store(true); padEnabled.store(false); padStop.store(true); }
+    void setPadEnabled(bool value) { padEnabled.store(value); }
+    bool getPadEnabled() const { return padEnabled.load(); }
+    void setPadVolume(float v) { padVolume.store(juce::jlimit(0.0f, 1.0f, v)); }
+    float getPadVolume() const { return padVolume.load(); }
+    void setPadTone(float v) { padTone.store(juce::jlimit(0.0f, 1.0f, v)); }
+    float getPadTone() const { return padTone.load(); }
+    void setPadRoot(int v) { padRoot.store(juce::jlimit(24, 72, v)); }
+    int getPadRoot() const { return padRoot.load(); }
     void setMaster(float v) { masterVolume.store(juce::jlimit(0.f,1.5f,v)); }
     float getMaster() const { return masterVolume.load(); }
     void setReverb(float v) { reverbAmount.store(juce::jlimit(0.f,0.6f,v)); }
@@ -218,9 +246,13 @@ public:
     float getPeak() const { return peak.load(); }
 
     void getStateInformation(juce::MemoryBlock& dest) override {
-        juce::XmlElement root("PlayStageSampler");
+        juce::XmlElement root("StageBridgeUnified");
         root.setAttribute("master", double(getMaster()));
         root.setAttribute("reverb", double(getReverb()));
+        root.setAttribute("padOn", getPadEnabled());
+        root.setAttribute("padVolume", double(getPadVolume()));
+        root.setAttribute("padTone", double(getPadTone()));
+        root.setAttribute("padRoot", getPadRoot());
         const juce::ScopedLock lock(stateMutex);
         for (int i=0;i<numLayers;++i) {
             auto* layer = root.createNewChildElement("Layer");
@@ -240,9 +272,13 @@ public:
     }
     void setStateInformation(const void* data,int bytes) override {
         const auto xml=getXmlFromBinary(data,bytes);
-        if (!xml || !xml->hasTagName("PlayStageSampler")) return;
+        if (!xml || !xml->hasTagName("StageBridgeUnified")) return;
         setMaster(float(xml->getDoubleAttribute("master",0.85)));
         setReverb(float(xml->getDoubleAttribute("reverb",0.1)));
+        setPadEnabled(xml->getBoolAttribute("padOn",false));
+        setPadVolume(float(xml->getDoubleAttribute("padVolume",0.38)));
+        setPadTone(float(xml->getDoubleAttribute("padTone",0.5)));
+        setPadRoot(xml->getIntAttribute("padRoot",45));
         {
             const juce::ScopedLock lock(stateMutex);
             for (auto* child : xml->getChildIterator()) {
@@ -250,7 +286,8 @@ public:
                 const int i=child->getIntAttribute("index",-1);
                 if (!juce::isPositiveAndBelow(i,numLayers)) continue;
                 auto& p=layers[(size_t)i];
-                layerFiles[(size_t)i]=juce::File(child->getStringAttribute("path"));
+                const auto storedPath = child->getStringAttribute("path");
+                layerFiles[(size_t)i] = storedPath.isNotEmpty() ? juce::File(storedPath) : juce::File();
                 p.volume.store(float(child->getDoubleAttribute("volume",0.8)));
                 p.muted.store(child->getBoolAttribute("mute",false));
                 p.solo.store(child->getBoolAttribute("solo",false));
@@ -354,18 +391,23 @@ private:
     float lastReverb=-1.0f;
     std::atomic<double> rate {44100.0};
     std::atomic<float> masterVolume {0.85f}, reverbAmount {0.10f}, peak {0.0f};
+    std::atomic<bool> padEnabled {false}, padStop {false};
+    std::atomic<float> padVolume {0.38f}, padTone {0.50f};
+    std::atomic<int> padRoot {45};
+    float padEnvelope = 0.0f;
+    double padPhase = 0.0, padFifthPhase = 0.0;
 };
 
 class StageEditor final : public juce::AudioProcessorEditor, private juce::Timer {
 public:
-    explicit StageEditor(PlayStageSampler& processor)
+    explicit StageEditor(StageBridgeUnified& processor)
       : juce::AudioProcessorEditor(&processor), engine(processor) {
-        setSize(1050,700);
-        header.setText("PLAYSTAGE  |  SAMPLER VST3",juce::dontSendNotification);
+        setSize(1050,756);
+        header.setText("STAGEBRIDGE + PLAYSTAGE | LIVE",juce::dontSendNotification);
         header.setColour(juce::Label::textColourId,juce::Colours::white);
         header.setFont(juce::Font(23.0f,juce::Font::bold));
         addAndMakeVisible(header);
-        subtitle.setText("5 CAMADAS / STAGEBRIDGE + PLAYSTAGE / MAPAS .PSMAP / MIDI",
+        subtitle.setText("5 CAMADAS / VST3 + STANDALONE / ABLETON .PSMAP / PAD CONTINUO",
                          juce::dontSendNotification);
         subtitle.setColour(juce::Label::textColourId,pale);
         addAndMakeVisible(subtitle);
@@ -410,6 +452,21 @@ public:
         masterLabel.setText("MASTER",juce::dontSendNotification);
         reverbLabel.setText("REVERB",juce::dontSendNotification);
         meter.setText("SAIDA: 0.00",juce::dontSendNotification);
+        padButton.setButtonText("PAD CONTINUO");
+        padButton.setClickingTogglesState(true);
+        padButton.setToggleState(engine.getPadEnabled(),juce::dontSendNotification);
+        padButton.onClick=[this] { engine.setPadEnabled(padButton.getToggleState()); };
+        addAndMakeVisible(padButton);
+        initSlider(padLevel,0.0,1.0,engine.getPadVolume());
+        padLevel.onValueChange=[this] { engine.setPadVolume(float(padLevel.getValue())); };
+        addAndMakeVisible(padLevel);
+        initSlider(padBrightness,0.0,1.0,engine.getPadTone());
+        padBrightness.onValueChange=[this] { engine.setPadTone(float(padBrightness.getValue())); };
+        addAndMakeVisible(padBrightness);
+        initSlider(padPitch,24,72,engine.getPadRoot());
+        padPitch.setRange(24,72,1);
+        padPitch.onValueChange=[this] { engine.setPadRoot(int(padPitch.getValue())); };
+        addAndMakeVisible(padPitch);
         panicButton.setButtonText("PANICO / ALL NOTES OFF");
         panicButton.onClick=[this]{ engine.panic(); };
         addAndMakeVisible(panicButton);
@@ -435,7 +492,7 @@ public:
             g.fillRoundedRectangle(16.0f,float(y),5.0f,85.0f,2.0f);
         }
         g.setColour(panel);
-        g.fillRoundedRectangle(16.0f,591.0f,float(getWidth()-32),93.0f,10.0f);
+        g.fillRoundedRectangle(16.0f,591.0f,float(getWidth()-32),149.0f,10.0f);
         g.setColour(pale);
         g.setFont(12.0f);
         for (int i=0;i<numLayers;++i) {
@@ -465,7 +522,11 @@ public:
         reverb.setBounds(386,607,166,32);
         panicButton.setBounds(566,603,200,36);
         meter.setBounds(782,606,230,28);
-        message.setBounds(27,651,950,22);
+        padButton.setBounds(32,652,153,34);
+        padLevel.setBounds(198,654,205,34);
+        padBrightness.setBounds(417,654,204,34);
+        padPitch.setBounds(637,654,180,34);
+        message.setBounds(28,713,961,22);
     }
 private:
     void initSlider(juce::Slider& s,double min,double max,double value) {
@@ -503,18 +564,19 @@ private:
         meter.setText("SAIDA: "+juce::String(engine.getPeak(),3),
                       juce::dontSendNotification);
     }
-    PlayStageSampler& engine;
+    StageBridgeUnified& engine;
     juce::Label header,subtitle,message,masterLabel,reverbLabel,meter;
     std::array<juce::Label,numLayers> labels;
     std::array<juce::TextButton,numLayers> loadButtons,muteButtons,soloButtons,midiButtons;
     juce::TextButton panicButton;
     std::array<juce::Slider,numLayers> gains,transposes,tones;
-    juce::Slider master,reverb;
+    juce::TextButton padButton;
+    juce::Slider master,reverb,padLevel,padBrightness,padPitch;
     std::unique_ptr<juce::FileChooser> chooser;
 };
-juce::AudioProcessorEditor* PlayStageSampler::createEditor() {
+juce::AudioProcessorEditor* StageBridgeUnified::createEditor() {
     return new StageEditor(*this);
 }
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {
-    return new PlayStageSampler();
+    return new StageBridgeUnified();
 }
