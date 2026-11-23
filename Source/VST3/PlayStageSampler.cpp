@@ -236,10 +236,10 @@ public:
             layer->setAttribute("high",layers[(size_t)i].noteHigh.load());
             layer->setAttribute("channel",layers[(size_t)i].midiChannel.load());
         }
-        juce::copyXmlToBinary(root,dest);
+        copyXmlToBinary(root,dest);
     }
     void setStateInformation(const void* data,int bytes) override {
-        const auto xml=juce::getXmlFromBinary(data,bytes);
+        const auto xml=getXmlFromBinary(data,bytes);
         if (!xml || !xml->hasTagName("PlayStageSampler")) return;
         setMaster(float(xml->getDoubleAttribute("master",0.85)));
         setReverb(float(xml->getDoubleAttribute("reverb",0.1)));
