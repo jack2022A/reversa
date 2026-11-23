@@ -111,7 +111,7 @@ public:
         bool anySolo = false;
         for (const auto& l : layers) anySolo |= l.solo.load();
         for (int layer = 0; layer < numLayers; ++layer) {
-            const auto& p = layers[(size_t) layer];
+            auto& p = layers[(size_t) layer];
             auto bank = std::atomic_load(&banks[(size_t) layer]);
             if (!bank) continue;
             if (p.flushNotes.exchange(false))
