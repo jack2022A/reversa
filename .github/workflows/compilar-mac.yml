@@ -1,8 +1,6 @@
 name: Compilar app macOS Intel
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
