@@ -32,7 +32,7 @@ public:
         const int vel = juce::jlimit(1, 127, juce::roundToInt(velocity * 127.0f));
         for (int i = 0; i < getNumSounds(); ++i) {
             auto sound = getSound(i);
-            auto* region = dynamic_cast<RegionSound*>(sound.get());
+            auto* region = static_cast<RegionSound*>(sound.get());
             if (region == nullptr || !region->appliesToNote(note)
                 || !region->appliesToChannel(channel) || !region->matchesVelocity(vel))
                 continue;
@@ -268,7 +268,8 @@ private:
         if (!root || root->getProperty("schema").toString()!="playstage.multisample/1") {
             error="Formato .psmap nao suportado.";return false;
         }
-        const auto* items=root->getProperty("samples").getArray();
+        const juce::var sampleValue=root->getProperty("samples");
+        const auto* items=sampleValue.getArray();
         if (!items || items->isEmpty() || items->size()>maxZones) {
             error="Mapa vazio ou mais de 256 regioes.";return false;
         }
@@ -359,7 +360,7 @@ public:
             initSlider(gains[(size_t)i],0.0,1.5,engine.getVolume(i));
             gains[(size_t)i].onValueChange=[this,i] {engine.setVolume(i,float(gains[(size_t)i].getValue()));};
             initSlider(transposes[(size_t)i],-24,24,engine.getTranspose(i));
-            transposes[(size_t)i].setInterval(1);
+            transposes[(size_t)i].setRange(-24,24,1);
             transposes[(size_t)i].onValueChange=[this,i] {engine.setTranspose(i,int(transposes[(size_t)i].getValue()));};
             addAndMakeVisible(gains[(size_t)i]);
             addAndMakeVisible(transposes[(size_t)i]);
