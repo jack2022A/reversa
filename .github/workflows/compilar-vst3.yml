@@ -9,6 +9,10 @@ on:
       - ".github/workflows/compilar-vst3.yml"
   workflow_dispatch:
 
+concurrency:
+  group: playstage-sampler-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -90,11 +94,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v0.6.0-vst3-prealpha \
-            saida/PlayStage_VST3_Catalina_Intel.zip \
-            saida/PlayStage_VST3_Windows_x64.zip \
-            --repo "${GITHUB_REPOSITORY}" \
-            --target "${GITHUB_SHA}" \
-            --title "PlayStage Sampler 0.6 - VST3 macOS e Windows (pre-alfa)" \
-            --notes "Instrumento VST3 e Standalone com 4 camadas, mapas .psmap do Ableton Live 11, regioes MIDI e velocidade, WAV/AIFF, volume, transpose, mute, solo e reverb. Sem samples comerciais, sem dispositivos exclusivos do Ableton, sem AU ou MainStage. Os bancos externos continuam na maquina do usuario. Experimental: teste antes de usar em palco." \
-            --prerelease
+          if gh release view v0.6.0-vst3-prealpha --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload v0.6.0-vst3-prealpha saida/PlayStage_VST3_Catalina_Intel.zip saida/PlayStage_VST3_Windows_x64.zip --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create v0.6.0-vst3-prealpha \
+              saida/PlayStage_VST3_Catalina_Intel.zip \
+              saida/PlayStage_VST3_Windows_x64.zip \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "PlayStage Sampler 0.6 - VST3 macOS e Windows (pre-alfa)" \
+              --notes "Instrumento VST3 e Standalone com 4 camadas, mapas .psmap do Ableton Live 11, regioes MIDI e velocidade, WAV/AIFF, volume, transpose, mute, solo e reverb. Sem samples comerciais, sem dispositivos exclusivos do Ableton, sem AU ou MainStage. Os bancos externos continuam na maquina do usuario. Experimental, teste antes de usar em palco." \
+              --prerelease
+          fi
